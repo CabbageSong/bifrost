@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bifrost"
+version = "0.1.0"
+description = "WebRTC-based private HTTP access through a public signaling server"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Bifrost contributors"}]
+dependencies = [
+    "aiohttp>=3.9",
+    "aiortc>=1.15",
+]
+
+[project.scripts]
+bifrost-server = "bifrost.server:main"
+bifrost-client = "bifrost.client:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bifrost = ["static/*.html"]

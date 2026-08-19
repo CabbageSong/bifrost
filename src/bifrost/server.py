@@ -1,11 +1,11 @@
 import argparse, asyncio, json, logging, ssl
-from pathlib import Path
+from importlib.resources import files
 from aiohttp import web, WSMsgType
 from .protocol import load_config
 
 log=logging.getLogger('bifrost.server'); rooms={}
 
-SHELL=(Path(__file__).parent.parent/'web'/'index.html').read_text()
+SHELL=files('bifrost').joinpath('static/index.html').read_text(encoding='utf-8')
 
 async def page(request):
     return web.Response(text=SHELL,content_type='text/html',headers={'Cache-Control':'no-store'})

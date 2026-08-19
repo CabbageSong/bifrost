@@ -18,3 +18,22 @@ python3 -m bifrost.client --config config/client.toml
 ```
 
 首次 demo 使用自签名证书，浏览器需手动信任证书。页面内的导航栏会拦截内网页面的站内超链接，通过同一条 DataChannel 请求新 URI；浏览器真实地址保持在 Bifrost 页面，连接 ID/建立时间用于确认是否重连。
+
+## 安装与打包
+
+项目采用 `src` 布局，元数据和依赖定义在 `pyproject.toml` 中。安装运行依赖并构建 wheel：
+
+```bash
+python -m pip install .
+python -m pip install build
+python -m build
+```
+
+构建产物位于 `dist/`，也可以直接使用安装后的命令：
+
+```bash
+bifrost-server --config /path/to/server.toml
+bifrost-client --config /path/to/client.toml
+```
+
+配置文件和证书是部署文件，不会被打进 wheel；`src/bifrost/static/index.html` 已作为包数据随 wheel 安装。

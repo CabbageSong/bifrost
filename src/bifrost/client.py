@@ -58,5 +58,13 @@ async def main(cfg):
         try: await run(cfg)
         except Exception: log.exception('client loop stopped')
         await asyncio.sleep(2)
-if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--config',required=True); args=ap.parse_args(); logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s'); asyncio.run(main(load_config(args.config)))
+def cli():
+    ap = argparse.ArgumentParser(description='Run the Bifrost private HTTP client')
+    ap.add_argument('--config', required=True, help='path to the TOML configuration file')
+    args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    asyncio.run(main(load_config(args.config)))
+
+
+if __name__ == '__main__':
+    cli()
