@@ -10,3 +10,11 @@ key = "/opt/bifrost/certs/privkey.pem"
 
 [stun]
 servers = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"]
+
+[auth]
+# Inline OpenSSH .pub/authorized_keys-compatible entries.
+public_keys = [
+  # "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... home-agent",
+  # "room=\"home\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... home-agent",
+]
+timeout = 10

@@ -1,3 +1,4 @@
 # Runtime dependencies are declared in pyproject.toml.
 aiohttp>=3.9
 aiortc>=1.15
+cryptography>=41
