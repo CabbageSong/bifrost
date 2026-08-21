@@ -75,7 +75,7 @@ async def _dispatch(channel, raw, handler: MessageHandler):
         if result is not None and channel.readyState == "open":
             channel.send(json.dumps(result))
     except Exception as exc:
-        log.exception("embedded request failed")
+        log.exception("request forwarding failed")
         if channel.readyState == "open":
             channel.send(json.dumps(http_response(request_id, 502, error=str(exc))))
 

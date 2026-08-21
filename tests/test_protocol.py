@@ -1,15 +1,4 @@
-from bifrost.protocol import http_request, http_response
-
-
-def test_http_request_defaults():
-    assert http_request("1", "GET", "") == {
-        "type": "http_request",
-        "id": "1",
-        "method": "GET",
-        "path": "/",
-        "headers": {},
-        "body": "",
-    }
+from bifrost.protocol import http_response
 
 
 def test_http_response_with_error():

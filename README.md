@@ -74,7 +74,7 @@ room="home" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... home-agent
 room="office" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... office-agent
 ```
 
-server 会在启动时读取并校验 `public_keys` 数组，只接受 `ssh-ed25519` 公钥；每个元素可以直接粘贴完整 `.pub` 行（包括末尾 comment），也可以使用 `room=...` 选项。空数组、非 Ed25519 key 或格式错误都会让服务拒绝启动。旧的 `authorized_keys` 路径配置仍兼容，但建议改用 `public_keys`。
+server 会在启动时读取并校验 `public_keys` 数组，只接受 `ssh-ed25519` 公钥；每个元素可以直接粘贴完整 `.pub` 行（包括末尾 comment），也可以使用 `room=...` 选项。空数组、非 Ed25519 key 或格式错误都会让服务拒绝启动。
 
 ## 安装与打包
 

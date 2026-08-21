@@ -2,14 +2,11 @@
 bind = "0.0.0.0"
 port = 8443
 room = "home"
-max_clients = 1
 
 [tls]
 cert = "/opt/bifrost/certs/fullchain.pem"
 key = "/opt/bifrost/certs/privkey.pem"
 
-[stun]
-servers = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"]
 
 [auth]
 # Inline OpenSSH .pub/authorized_keys-compatible entries.

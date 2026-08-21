@@ -93,7 +93,7 @@ async def signal(request):
 def create_app(cfg):
     auth = cfg['auth']
     app=web.Application()
-    app[AUTHORIZED_KEYS] = load_authorized_keys(auth.get('public_keys', auth.get('authorized_keys')))
+    app[AUTHORIZED_KEYS] = load_authorized_keys(auth['public_keys'])
     app[AUTH_TIMEOUT] = float(auth.get('timeout', 10))
     app[DEFAULT_ROOM] = cfg.get('server', {}).get('room', 'home')
     app.router.add_get('/signal',signal); app.router.add_get('/server-healthz',health); app.router.add_get('/',page); app.router.add_get('/{tail:.*}',page)

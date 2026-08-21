@@ -6,8 +6,6 @@ verify_tls = false
 [local_http]
 target = "http://127.0.0.1:18080"
 
-[stun]
-servers = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"]
 
 [auth]
 # Generate with: ssh-keygen -t ed25519 -f /opt/bifrost/keys/agent_ed25519

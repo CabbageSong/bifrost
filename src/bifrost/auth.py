@@ -97,31 +97,18 @@ def parse_public_key(text: str) -> Ed25519PublicKey:
     return key
 
 
-def _authorized_key_lines(source: str | Path | list[str] | tuple[str, ...]) -> tuple[str, ...]:
-    # Path is retained for backwards compatibility, but server configuration
-    # should normally provide a TOML array of .pub/authorized_keys lines.
-    if isinstance(source, Path):
-        return tuple(source.expanduser().read_text(encoding="utf-8").splitlines())
+def _authorized_key_lines(source: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
     if isinstance(source, (list, tuple)):
-        return tuple(str(item) for item in source)
-    value = str(source)
-    candidate = Path(value).expanduser()
-    if "\n" not in value and candidate.is_file():
-        return tuple(candidate.read_text(encoding="utf-8").splitlines())
-    return tuple(value.splitlines())
+        return tuple(
+            line for item in source for line in str(item).splitlines()
+        )
+    return tuple(str(source).splitlines())
 
 
 def load_authorized_keys(
-    source: str | Path | list[str] | tuple[str, ...],
+    source: str | list[str] | tuple[str, ...],
 ) -> dict[bytes, AuthorizedKey]:
-    """Load inline OpenSSH-style authorized key lines.
-
-    ``source`` may be a TOML list of strings, a multiline string, or (for
-    backwards compatibility) a path to an authorized_keys file. Each string
-    accepts the normal ``.pub`` format, including a trailing comment.
-    Plain ``ssh-ed25519`` lines authorize every room; ``room=...`` options
-    restrict a key to a room.
-    """
+    """Load inline OpenSSH-style authorized key lines from configuration."""
     result: dict[bytes, AuthorizedKey] = {}
     for line_number, raw_line in enumerate(_authorized_key_lines(source), 1):
         line = raw_line.strip()
@@ -132,7 +119,7 @@ def load_authorized_keys(
             key_index = fields.index(_KEY_TYPE)
         except ValueError as exc:
             raise ValueError(
-                f"authorized_keys entry {line_number}: only ssh-ed25519 keys are supported"
+                f"public_keys entry {line_number}: only ssh-ed25519 keys are supported"
             ) from exc
         key = parse_public_key(" ".join(fields[key_index:key_index + 2]))
         raw = public_key_bytes(key)
@@ -148,7 +135,7 @@ def load_authorized_keys(
                 rooms = previous.rooms | rooms
         result[raw] = AuthorizedKey(key, rooms, fingerprint(key))
     if not result:
-        raise ValueError("authorized_keys contains no Ed25519 keys")
+        raise ValueError("public_keys contains no Ed25519 keys")
     return result
 
 

@@ -38,7 +38,7 @@ def test_load_private_key_and_authorized_keys(tmp_path):
     )
 
     loaded_private = load_private_key(private_path)
-    authorized = load_authorized_keys(authorized_path)
+    authorized = load_authorized_keys([authorized_path.read_text(encoding='utf-8')])
     entry = authorized[public_key_bytes(loaded_private.public_key())]
     challenge = b'x' * 32
     signature = loaded_private.sign(auth_payload('home', challenge))
