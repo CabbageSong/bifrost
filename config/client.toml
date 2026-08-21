@@ -1,11 +1,19 @@
 [signal]
 url = "wss://v.phenix.my:8443/signal"
-room = "home"
 verify_tls = false
 
 [local_http]
-target = "http://127.0.0.1:18080"
+host = "127.0.0.1"
+scheme = "http"
 
+[[services]]
+room = "home"
+local_port = 18080
+
+# Add more room-to-port mappings as needed.
+# [[services]]
+# room = "office"
+# local_port = 10080
 
 [auth]
 # Generate with: ssh-keygen -t ed25519 -f /opt/bifrost/keys/agent_ed25519

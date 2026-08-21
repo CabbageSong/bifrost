@@ -65,7 +65,7 @@ https://v.phenix.my/office
 http://127.0.0.1:10080/healthz
 ```
 
-`/home/healthz` 也支持作为首次打开页面的深链接，但建立页面后后续导航不会改变公网地址；实际请求路径不会包含 `/home`。本地目标地址仍由 client 的 `local_http.target` 配置决定。
+`/home/healthz` 也支持作为首次打开页面的深链接，但建立页面后后续导航不会改变公网地址；实际请求路径不会包含 `/home`。本地目标地址由 client 的 `[[services]]` room/port 映射决定。
 
 普通的 `ssh-ed25519 ...` 行允许该 key 注册任意 room。需要按 room 授权时，在公钥行前增加自定义的 `room` 选项；同一个 key 可重复多行来授权多个 room：
 
@@ -75,6 +75,35 @@ room="office" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... office-agent
 ```
 
 server 会在启动时读取并校验 `public_keys` 数组，只接受 `ssh-ed25519` 公钥；每个元素可以直接粘贴完整 `.pub` 行（包括末尾 comment），也可以使用 `room=...` 选项。空数组、非 Ed25519 key 或格式错误都会让服务拒绝启动。
+
+## 一个 client 注册多个 room
+
+信令地址、TLS 和 Ed25519 密钥由所有服务共用，每个 `[[services]]` 条目配置一个 room 和本地端口：
+
+```toml
+[signal]
+url = "wss://v.phenix.my:8443/signal"
+verify_tls = true
+
+[local_http]
+host = "127.0.0.1"
+scheme = "http"
+
+[[services]]
+room = "home"
+local_port = 10080
+
+[[services]]
+room = "office"
+local_port = 10081
+
+[auth]
+private_key = "/opt/bifrost/keys/agent_ed25519"
+public_key = "/opt/bifrost/keys/agent_ed25519.pub"
+timeout = 10
+```
+
+同一个 client 进程会并行注册 `home` 和 `office`，分别转发到 `127.0.0.1:10080` 和 `127.0.0.1:10081`。room 不允许重复，端口范围必须是 1 到 65535。server 的 `public_keys` 必须允许该公钥进入对应 room。
 
 ## 安装与打包
 

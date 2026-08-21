@@ -80,11 +80,11 @@ async def _dispatch(channel, raw, handler: MessageHandler):
             channel.send(json.dumps(http_response(request_id, 502, error=str(exc))))
 
 
-async def run_agent(cfg, handler: MessageHandler):
+async def run_agent(cfg, handler: MessageHandler, identity=None):
     """Run one authenticated signaling/WebRTC session using ``handler``."""
     signal = cfg["signal"]
     auth = cfg["auth"]
-    private_key, public_key = load_identity(auth)
+    private_key, public_key = identity or load_identity(auth)
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(
             signal["url"],
@@ -174,11 +174,12 @@ async def run_agent(cfg, handler: MessageHandler):
                 await pc.close()
 
 
-async def serve_agent(cfg, handler: MessageHandler, reconnect_delay=2):
+async def serve_agent(cfg, handler: MessageHandler, reconnect_delay=2, identity=None):
     """Keep an agent registered, reconnecting after transient failures."""
+    identity = identity or load_identity(cfg["auth"])
     while True:
         try:
-            await run_agent(cfg, handler)
+            await run_agent(cfg, handler, identity)
         except asyncio.CancelledError:
             raise
         except Exception:

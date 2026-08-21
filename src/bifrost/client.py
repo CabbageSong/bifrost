@@ -1,4 +1,4 @@
-"""Sidecar mode: proxy DataChannel HTTP messages to a local HTTP server."""
+"""Proxy one or more Bifrost rooms to local HTTP ports."""
 
 import argparse
 import asyncio
@@ -7,10 +7,40 @@ import logging
 
 import aiohttp
 
-from .agent import serve_agent
+from .agent import load_identity, serve_agent
 from .protocol import http_response, load_config
 
 log = logging.getLogger("bifrost.client")
+
+
+def configured_services(cfg):
+    """Validate and normalize the room-to-local-port mappings."""
+    services = cfg.get("services")
+    if not isinstance(services, list) or not services:
+        raise ValueError("client config requires at least one [[services]] entry")
+    local = cfg.get("local_http", {})
+    scheme = local.get("scheme", "http")
+    host = local.get("host", "127.0.0.1")
+    seen_rooms = set()
+    result = []
+    for index, service in enumerate(services, 1):
+        room = str(service.get("room", "")).strip()
+        if not room:
+            raise ValueError(f"services entry {index} requires room")
+        if room in seen_rooms:
+            raise ValueError(f"duplicate room in client config: {room}")
+        try:
+            port = int(service["local_port"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"services entry {index} requires local_port") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError(f"invalid local_port for room {room}: {port}")
+        seen_rooms.add(room)
+        signal = dict(cfg["signal"])
+        signal["room"] = room
+        service_cfg = {"signal": signal, "auth": cfg["auth"]}
+        result.append((room, f"{scheme}://{host}:{port}", service_cfg))
+    return result
 
 
 async def proxy_http(message, target, session):
@@ -32,7 +62,7 @@ async def proxy_http(message, target, session):
     try:
         async with session.request(
             message.get("method", "GET"),
-            target.rstrip("/") + path,
+            target + path,
             headers=headers,
             data=body,
         ) as response:
@@ -53,9 +83,18 @@ async def proxy_http(message, target, session):
 
 
 async def run(cfg):
-    target = cfg["local_http"]["target"]
+    services = configured_services(cfg)
+    identity = load_identity(cfg["auth"])
     async with aiohttp.ClientSession() as session:
-        await serve_agent(cfg, lambda message: proxy_http(message, target, session))
+        tasks = []
+        for room, target, service_cfg in services:
+            log.info("registering room=%s target=%s", room, target)
+
+            async def handler(message, target=target):
+                return await proxy_http(message, target, session)
+
+            tasks.append(serve_agent(service_cfg, handler, identity=identity))
+        await asyncio.gather(*tasks)
 
 
 def cli():
