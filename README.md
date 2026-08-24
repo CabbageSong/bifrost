@@ -17,6 +17,8 @@ python3 -m bifrost.server --config config/server.toml
 python3 -m bifrost.client --config config/client.toml
 ```
 
+内网 client 会使用 `config/client.toml` 中的 `signal.room` 注册 room。client 启动后，通过 `https://<server>:8443/?room=<room>` 访问对应的内网服务；未注册的 room 会被 server 拒绝。
+
 首次 demo 使用自签名证书，浏览器需手动信任证书。页面内的导航栏会拦截内网页面的站内超链接，通过同一条 DataChannel 请求新 URI；浏览器真实地址保持在 Bifrost 页面，连接 ID/建立时间用于确认是否重连。
 
 ## 安装与打包

@@ -11,10 +11,16 @@ async def page(request):
     return web.Response(text=SHELL,content_type='text/html',headers={'Cache-Control':'no-store'})
 async def health(request): return web.Response(text='ok\n')
 async def signal(request):
-    role=request.query.get('role'); room=request.query.get('room','home')
+    role=request.query.get('role'); room=request.query.get('room','').strip()
     if role not in ('client','agent'): return web.Response(status=400,text='bad role')
+    if not room: return web.Response(status=400,text='missing room')
+    if role=='agent':
+        state=rooms.setdefault(room,{'agent':None,'clients':set()})
+    else:
+        state=rooms.get(room)
+        if not state or not state['agent'] or state['agent'].closed:
+            return web.Response(status=409,text='room not ready')
     ws=web.WebSocketResponse(max_msg_size=8*1024*1024); await ws.prepare(request)
-    state=rooms.setdefault(room,{'agent':None,'clients':set()})
     if role=='agent':
         if state['agent'] and not state['agent'].closed:
             await ws.close(code=1013,message=b'agent already connected'); return ws
@@ -33,7 +39,9 @@ async def signal(request):
                 if target and not target.closed: await target.send_json(data)
     finally:
         if role=='agent' and state.get('agent') is ws: state['agent']=None
-        state['clients'].discard(ws); log.info('%s disconnected room=%s',role,room)
+        state['clients'].discard(ws)
+        if not state['agent'] and not state['clients'] and rooms.get(room) is state: rooms.pop(room)
+        log.info('%s disconnected room=%s',role,room)
     return ws
 
 def main():

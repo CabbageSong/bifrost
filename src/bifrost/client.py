@@ -8,7 +8,7 @@ log=logging.getLogger('bifrost.client')
 async def run(cfg):
     signal=cfg['signal']; target=cfg['local_http']['target'];
     async with aiohttp.ClientSession() as session:
-      async with session.ws_connect(signal['url']+'?role=agent&room='+signal['room'],ssl=False if not signal.get('verify_tls',True) else None,heartbeat=20,max_msg_size=8*1024*1024) as sig:
+      async with session.ws_connect(signal['url'],params={'role':'agent','room':signal['room']},ssl=False if not signal.get('verify_tls',True) else None,heartbeat=20,max_msg_size=8*1024*1024) as sig:
         pc=None; pending=[]
         async def send(x):
             if not sig.closed: await sig.send_json(x)
