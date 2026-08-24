@@ -20,6 +20,7 @@ def main() -> None:
         from .client import cli as run
     # The component parsers currently read sys.argv directly.
     import sys
+
     sys.argv[1:] = rest
     run()
 
