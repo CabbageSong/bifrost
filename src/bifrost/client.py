@@ -8,7 +8,13 @@ import logging
 import aiohttp
 
 from .agent import load_identity, serve_agent
-from .protocol import decode_body, encode_body, http_response, load_config
+from .protocol import (
+    decode_body,
+    encode_body,
+    http_response,
+    load_config,
+    resolve_config_path,
+)
 from .room_auth import parse_password_hash, validate_room_name
 
 log = logging.getLogger("bifrost.client")
@@ -133,10 +139,17 @@ async def run(cfg):
 
 def cli():
     parser = argparse.ArgumentParser(description="Run the Bifrost HTTP sidecar")
-    parser.add_argument("--config", required=True, help="path to TOML configuration")
+    parser.add_argument(
+        "--config",
+        help="path to TOML configuration (default: ~/.config/bifrost/client.toml)",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    asyncio.run(run(load_config(args.config)))
+    try:
+        config_path = resolve_config_path(args.config, "client")
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+    asyncio.run(run(load_config(config_path)))
 
 
 if __name__ == "__main__":

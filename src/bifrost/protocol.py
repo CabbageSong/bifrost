@@ -3,6 +3,33 @@ import tomllib
 from pathlib import Path
 
 
+def default_config_path(component, config_dir=None):
+    """Return the required per-component config path under ~/.config/bifrost."""
+    if component not in {"server", "client"}:
+        raise ValueError(f"unsupported config component: {component}")
+    directory = (
+        Path(config_dir).expanduser()
+        if config_dir is not None
+        else Path("~/.config/bifrost").expanduser()
+    )
+    path = directory / f"{component}.toml"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{component} config not found at {path}; "
+            f"create it or pass --config PATH"
+        )
+    return path
+
+
+def resolve_config_path(path, component, config_dir=None):
+    """Resolve an explicit config path or the component's default path."""
+    return (
+        Path(path).expanduser()
+        if path
+        else default_config_path(component, config_dir)
+    )
+
+
 def load_config(path):
     with Path(path).open("rb") as f:
         return tomllib.load(f)

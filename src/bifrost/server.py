@@ -22,7 +22,7 @@ from .auth import (
     verify_legacy_signature,
     verify_signature,
 )
-from .protocol import load_config
+from .protocol import load_config, resolve_config_path
 from .room_auth import (
     create_login_token,
     create_session_token,
@@ -557,9 +557,16 @@ def create_app(cfg):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--config",
+        help="path to TOML configuration (default: ~/.config/bifrost/server.toml)",
+    )
     args = parser.parse_args()
-    cfg = load_config(args.config)
+    try:
+        config_path = resolve_config_path(args.config, "server")
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+    cfg = load_config(config_path)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app = create_app(cfg)
     context = create_ssl_context(cfg.get("tls", {}))

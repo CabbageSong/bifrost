@@ -17,6 +17,16 @@ python3 -m bifrost.server --config config/server.toml
 python3 -m bifrost.client --config config/client.toml
 ```
 
+不指定 `--config` 时，server 和 client 分别读取 `~/.config/bifrost/server.toml`、`~/.config/bifrost/client.toml`；默认文件不存在会直接报错退出。可以先创建配置目录并复制示例：
+
+```bash
+mkdir -p ~/.config/bifrost
+cp config/server.toml ~/.config/bifrost/server.toml
+cp config/client.toml ~/.config/bifrost/client.toml
+python3 -m bifrost.server
+python3 -m bifrost.client
+```
+
 server 默认按 `[tls]` 配置使用 HTTPS/WSS。如果 `tls.cert` 和 `tls.key` 同时配置为空字符串，server 会改用 HTTP/WS；两者只能同时为空或同时非空。纯 HTTP 不会加密密码、Cookie 或业务流量，只适合可信内网、反向代理已在前面终止 TLS 的部署，或临时调试环境。
 
 内网 client 会使用 `config/client.toml` 中的 `[[services]]` 注册一个或多个 room。client 启动后，可以在 `https://<server>:8443/` 输入 room 名称，也可以直接打开 `https://<server>:8443/<room>`；未注册的 room 会被 server 拒绝。`/<room>/some/path?x=1` 这样的深链接会在登录成功后回到原地址。

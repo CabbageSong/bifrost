@@ -1,4 +1,30 @@
-from bifrost.protocol import decode_body, encode_body, http_request, http_response
+import pytest
+
+from bifrost.protocol import (
+    decode_body,
+    default_config_path,
+    encode_body,
+    http_request,
+    http_response,
+    resolve_config_path,
+)
+
+
+def test_default_config_path_requires_component_toml(tmp_path):
+    with pytest.raises(FileNotFoundError, match="server config not found"):
+        default_config_path("server", tmp_path)
+
+    config_path = tmp_path / "server.toml"
+    config_path.write_text("[server]\n", encoding="utf-8")
+    assert default_config_path("server", tmp_path) == config_path
+    assert resolve_config_path(None, "server", tmp_path) == config_path
+    explicit_path = tmp_path / "custom.toml"
+    assert resolve_config_path(str(explicit_path), "server") == explicit_path
+
+
+def test_default_config_path_rejects_unknown_component(tmp_path):
+    with pytest.raises(ValueError, match="unsupported config component"):
+        default_config_path("worker", tmp_path)
 
 
 def test_http_request_defaults():
