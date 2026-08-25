@@ -1,7 +1,16 @@
 [server]
 bind = "0.0.0.0"
 port = 8443
+room = "home"
 
 [tls]
 cert = "/opt/bifrost/certs/fullchain.pem"
 key = "/opt/bifrost/certs/privkey.pem"
+
+[auth]
+# Inline OpenSSH .pub/authorized_keys-compatible entries.
+public_keys = [
+  # "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... home-agent",
+  # "room=\"home\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... home-agent",
+]
+timeout = 10

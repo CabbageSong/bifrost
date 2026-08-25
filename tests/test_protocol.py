@@ -10,8 +10,6 @@ def test_http_request_defaults():
         "headers": {},
         "body": "",
     }
-
-
 def test_http_response_with_error():
     response = http_response(2, 502, error="upstream unavailable")
     assert response["type"] == "http_response"

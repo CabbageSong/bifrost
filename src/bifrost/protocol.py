@@ -7,10 +7,7 @@ def load_config(path):
     with Path(path).open("rb") as f:
         return tomllib.load(f)
 
-
-def http_request(
-    request_id, method, path, headers=None, body="", body_base64=None
-):
+def http_request(request_id, method, path, headers=None, body="", body_base64=None):
     result = {
         "type": "http_request",
         "id": request_id,

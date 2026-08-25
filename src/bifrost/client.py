@@ -1,170 +1,121 @@
-import argparse, asyncio, json, logging
+"""Proxy one or more Bifrost rooms to local HTTP ports."""
+
+import argparse
+import asyncio
+import json
+import logging
+
 import aiohttp
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.sdp import candidate_from_sdp
-from .protocol import decode_body, encode_body, load_config, http_response
+
+from .agent import load_identity, serve_agent
+from .protocol import decode_body, encode_body, http_response, load_config
 
 log = logging.getLogger("bifrost.client")
 
 
-async def run(cfg):
-    signal = cfg["signal"]
-    target = cfg["local_http"]["target"]
-    # One session keeps upstream cookies and pooled connections for the life of
-    # the peer. unsafe=True is needed for the common 127.0.0.1 target.
-    cookie_jar = aiohttp.CookieJar(unsafe=True)
-    async with aiohttp.ClientSession(cookie_jar=cookie_jar) as session:
-        async with session.ws_connect(
-            signal["url"],
-            params={"role": "agent", "room": signal["room"]},
-            ssl=False if not signal.get("verify_tls", True) else None,
-            heartbeat=20,
-            max_msg_size=8 * 1024 * 1024,
-        ) as sig:
-            pc = None
-            pending = []
-
-            async def send(x):
-                if not sig.closed:
-                    await sig.send_json(x)
-
-            async def new_pc():
-                nonlocal pc
-                if pc:
-                    await pc.close()
-                pc = RTCPeerConnection()
-
-                @pc.on("icecandidate")
-                async def ice(c):
-                    if c:
-                        await send(
-                            {
-                                "type": "candidate",
-                                "candidate": {
-                                    "candidate": c.to_sdp(),
-                                    "sdpMid": c.sdpMid,
-                                    "sdpMLineIndex": c.sdpMLineIndex,
-                                },
-                            }
-                        )
-
-                @pc.on("connectionstatechange")
-                async def state():
-                    log.info(
-                        "peer state=%s ice=%s",
-                        pc.connectionState,
-                        pc.iceConnectionState,
-                    )
-
-                @pc.on("datachannel")
-                def channel(ch):
-                    log.info("datachannel=%s", ch.label)
-
-                    @ch.on("message")
-                    def message(raw):
-                        asyncio.create_task(handle_http(ch, raw, target, session))
-
-                return pc
-
-            async for msg in sig:
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                m = json.loads(msg.data)
-                if m.get("type") == "offer":
-                    pc = await new_pc()
-                    await pc.setRemoteDescription(RTCSessionDescription(**m["sdp"]))
-                    for c in pending:
-                        try:
-                            await pc.addIceCandidate(c)
-                        except Exception:
-                            pass
-                    pending = []
-                    answer = await pc.createAnswer()
-                    await pc.setLocalDescription(answer)
-                    await send(
-                        {
-                            "type": "answer",
-                            "sdp": {
-                                "sdp": pc.localDescription.sdp,
-                                "type": pc.localDescription.type,
-                            },
-                        }
-                    )
-                elif m.get("type") == "candidate" and m.get("candidate"):
-                    c = m["candidate"]
-                    cand = candidate_from_sdp(c["candidate"])
-                    cand.sdpMid = c.get("sdpMid")
-                    cand.sdpMLineIndex = c.get("sdpMLineIndex")
-                    if pc and pc.remoteDescription:
-                        await pc.addIceCandidate(cand)
-                    else:
-                        pending.append(cand)
-            if pc:
-                await pc.close()
+def configured_services(cfg):
+    """Validate and normalize the room-to-local-port mappings."""
+    services = cfg.get("services")
+    if not isinstance(services, list) or not services:
+        raise ValueError("client config requires at least one [[services]] entry")
+    local = cfg.get("local_http", {})
+    scheme = local.get("scheme", "http")
+    host = local.get("host", "127.0.0.1")
+    seen_rooms = set()
+    result = []
+    for index, service in enumerate(services, 1):
+        room = str(service.get("room", "")).strip()
+        if not room:
+            raise ValueError(f"services entry {index} requires room")
+        if room in seen_rooms:
+            raise ValueError(f"duplicate room in client config: {room}")
+        try:
+            port = int(service["local_port"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"services entry {index} requires local_port") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError(f"invalid local_port for room {room}: {port}")
+        seen_rooms.add(room)
+        signal = dict(cfg["signal"])
+        signal["room"] = room
+        service_cfg = {"signal": signal, "auth": cfg["auth"]}
+        result.append((room, f"{scheme}://{host}:{port}", service_cfg))
+    return result
 
 
-async def handle_http(ch, raw, target, session):
+async def proxy_http(message, target, session):
+    """Forward one DataChannel HTTP request to a configured local service."""
+    request_id = message.get("id")
+    if message.get("type") != "http_request":
+        return None
     try:
-        m = json.loads(raw)
-        rid = m.get("id")
-        if m.get("type") != "http_request":
-            return
-        path = m.get("path") or "/"
+        path = message.get("path") or "/"
         path = path if path.startswith("/") else "/" + path
         headers = {
-            k: v
-            for k, v in m.get("headers", {}).items()
-            if k.lower() not in ("host", "content-length")
+            key: value
+            for key, value in message.get("headers", {}).items()
+            if key.lower() not in ("host", "content-length")
         }
-        if m.get("body_base64") is not None:
-            body = decode_body(m["body_base64"])
+        if message.get("body_base64") is not None:
+            body = decode_body(message["body_base64"])
         else:
-            body = (m.get("body") or "").encode("utf-8")
-        method = (m.get("method") or "GET").upper()
+            body = (message.get("body") or "").encode("utf-8")
+        method = (message.get("method") or "GET").upper()
         async with session.request(
             method,
             target.rstrip("/") + path,
             headers=headers,
             data=body or None,
-        ) as r:
-            response_body = await r.read()
-            result = http_response(
-                rid,
-                r.status,
-                dict(r.headers),
-                response_body.decode("utf-8", "replace"),
-                body_base64=encode_body(response_body),
-                status_text=r.reason or "",
-                response_url=r.url.raw_path_qs,
+        ) as response:
+            raw_body = await response.read()
+            return http_response(
+                request_id,
+                response.status,
+                dict(response.headers),
+                raw_body.decode("utf-8", "replace"),
+                body_base64=encode_body(raw_body),
+                status_text=response.reason or "",
+                response_url=response.url.raw_path_qs,
             )
-        ch.send(json.dumps(result))
-    except Exception as e:
-        ch.send(
-            json.dumps(
-                http_response(rid if "rid" in locals() else None, 502, error=str(e))
-            )
-        )
+    except Exception as exc:
+        return http_response(request_id, 502, error=str(exc))
 
 
-async def main(cfg):
-    while True:
-        try:
-            await run(cfg)
-        except Exception:
-            log.exception("client loop stopped")
-        await asyncio.sleep(2)
+async def handle_http(channel, raw, target, session):
+    """Compatibility adapter for callers that provide raw channel messages."""
+    request_id = None
+    try:
+        message = json.loads(raw)
+        request_id = message.get("id")
+        result = await proxy_http(message, target, session)
+        if result is not None:
+            channel.send(json.dumps(result))
+    except Exception as exc:
+        channel.send(json.dumps(http_response(request_id, 502, error=str(exc))))
+
+
+async def run(cfg):
+    services = configured_services(cfg)
+    identity = load_identity(cfg["auth"])
+    cookie_jar = aiohttp.CookieJar(unsafe=True)
+    async with aiohttp.ClientSession(cookie_jar=cookie_jar) as session:
+        tasks = []
+        for room, target, service_cfg in services:
+            log.info("registering room=%s target=%s", room, target)
+
+            async def handler(message, target=target):
+                return await proxy_http(message, target, session)
+
+            tasks.append(serve_agent(service_cfg, handler, identity=identity))
+        await asyncio.gather(*tasks)
 
 
 def cli():
-    ap = argparse.ArgumentParser(description="Run the Bifrost private HTTP client")
-    ap.add_argument(
-        "--config", required=True, help="path to the TOML configuration file"
-    )
-    args = ap.parse_args()
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
-    asyncio.run(main(load_config(args.config)))
+    parser = argparse.ArgumentParser(description="Run the Bifrost HTTP sidecar")
+    parser.add_argument("--config", required=True, help="path to TOML configuration")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    asyncio.run(run(load_config(args.config)))
 
 
 if __name__ == "__main__":
