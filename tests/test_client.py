@@ -23,7 +23,13 @@ def test_empty_or_missing_password_hash_means_public_room():
         "signal": {"url": "wss://example.test/signal"},
         "auth": {},
         "services": [
-            {"room": "empty", "local_port": 8001, "password_hash": ""},
+            {
+                "room": "empty",
+                "local_port": 8001,
+                "host": "127.0.0.2",
+                "scheme": "https",
+                "password_hash": "",
+            },
             {"room": "missing", "local_port": 8002},
         ],
     }
@@ -31,6 +37,8 @@ def test_empty_or_missing_password_hash_means_public_room():
 
     assert services[0][2]["browser_auth"]["password_hash"] == ""
     assert services[1][2]["browser_auth"]["password_hash"] == ""
+    assert services[0][1] == "https://127.0.0.2:8001"
+    assert services[1][1] == "http://127.0.0.1:8002"
 
 
 def test_service_rejects_plaintext_passwords():
@@ -48,6 +56,24 @@ def test_service_rejects_plaintext_passwords():
                 ],
             }
         )
+
+
+def test_service_rejects_invalid_host_or_scheme():
+    with pytest.raises(ValueError, match="invalid scheme"):
+        configured_services(
+            config([{"room": "home", "local_port": 8001, "scheme": "ftp"}])
+        )
+    with pytest.raises(ValueError, match="invalid host"):
+        configured_services(
+            config([{"room": "home", "local_port": 8001, "host": "http://x"}])
+        )
+
+
+def test_legacy_local_http_is_a_service_default():
+    cfg = config([{"room": "home", "local_port": 8001}])
+    cfg["local_http"] = {"host": "legacy.test", "scheme": "https"}
+
+    assert configured_services(cfg)[0][1] == "https://legacy.test:8001"
 
 
 @pytest.mark.parametrize(
@@ -167,7 +193,6 @@ def test_handle_http_reuses_cookies_and_reports_redirect_url():
 def config(services):
     return {
         'signal': {'url': 'wss://example.test/signal', 'verify_tls': True},
-        'local_http': {'host': '127.0.0.1', 'scheme': 'http'},
         'auth': {'private_key': 'private', 'public_key': 'public'},
         'services': services,
     }

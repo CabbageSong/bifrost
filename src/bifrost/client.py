@@ -6,6 +6,7 @@ import json
 import logging
 
 import aiohttp
+from yarl import URL
 
 from .agent import load_identity, serve_agent
 from .protocol import (
@@ -26,8 +27,10 @@ def configured_services(cfg):
     if not isinstance(services, list) or not services:
         raise ValueError("client config requires at least one [[services]] entry")
     local = cfg.get("local_http", {})
-    scheme = local.get("scheme", "http")
-    host = local.get("host", "127.0.0.1")
+    if local:
+        log.warning(
+            "[local_http] is deprecated; configure host and scheme in each service"
+        )
     seen_rooms = set()
     result = []
     for index, service in enumerate(services, 1):
@@ -45,6 +48,20 @@ def configured_services(cfg):
         if not 1 <= port <= 65535:
             raise ValueError(f"invalid local_port for room {room}: {port}")
         seen_rooms.add(room)
+        scheme = service.get("scheme", local.get("scheme", "http"))
+        host = service.get("host", local.get("host", "127.0.0.1"))
+        if not isinstance(scheme, str) or scheme.lower() not in {
+            "http",
+            "https",
+        }:
+            raise ValueError(f"invalid scheme for room {room}: expected http or https")
+        scheme = scheme.lower()
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError(f"invalid host for room {room}")
+        try:
+            target = str(URL.build(scheme=scheme, host=host, port=port))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid host for room {room}") from exc
         if "password" in service:
             raise ValueError(
                 f"services entry {index} uses unsupported password; use password_hash"
@@ -66,7 +83,7 @@ def configured_services(cfg):
             "auth": cfg["auth"],
             "browser_auth": {"password_hash": password_hash},
         }
-        result.append((room, f"{scheme}://{host}:{port}", service_cfg))
+        result.append((room, target, service_cfg))
     return result
 
 
@@ -144,7 +161,9 @@ def cli():
         help="path to TOML configuration (default: ~/.config/bifrost/client.toml)",
     )
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     try:
         config_path = resolve_config_path(args.config, "client")
     except FileNotFoundError as exc:

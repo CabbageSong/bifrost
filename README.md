@@ -37,11 +37,13 @@ server 默认按 `[tls]` 配置使用 HTTPS/WSS。如果 `tls.cert` 和 `tls.key
 
 ## Room 浏览器访问密码
 
-密码按 `[[services]]` 配置，因为 room 及其本地端口都由内网 client 管理。已有自身用户认证的服务可以明确配置为空，Bifrost 不再增加一层登录：
+密码按 `[[services]]` 配置，因为 room 及其内网目标都由 client 管理。已有自身用户认证的服务可以明确配置为空，Bifrost 不再增加一层登录：
 
 ```toml
 [[services]]
 room = "public-app"
+host = "127.0.0.1"
+scheme = "http"
 local_port = 10080
 password_hash = ""
 ```
@@ -51,6 +53,16 @@ password_hash = ""
 ```bash
 bifrost-hash-password
 # 或：python -m bifrost hash-password
+# 统一入口：bifrost hash-password
+```
+
+如果更新代码后出现 `bifrost-hash-password: command not found`，需要重新安装项目以生成新增的入口脚本，并确保虚拟环境已激活：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+source .venv/bin/activate
+bifrost-hash-password
 ```
 
 将输出完整复制到对应 service：
@@ -58,6 +70,8 @@ bifrost-hash-password
 ```toml
 [[services]]
 room = "home"
+host = "127.0.0.1"
+scheme = "http"
 local_port = 10081
 password_hash = "$scrypt$v=1$n=32768,r=8,p=1$<salt>$<derived-key>"
 ```
@@ -146,24 +160,24 @@ server 会在启动时读取并校验 `public_keys` 数组，只接受 `ssh-ed25
 
 ## 一个 client 注册多个 room
 
-信令地址、TLS 和 Ed25519 密钥由所有服务共用，每个 `[[services]]` 条目配置一个 room 和本地端口：
+信令地址、TLS 校验和 Ed25519 密钥由所有服务共用，每个 `[[services]]` 条目配置自己的 room、目标 host、协议和端口：
 
 ```toml
 [signal]
 url = "wss://v.phenix.my:8443/signal"
 verify_tls = true
 
-[local_http]
-host = "127.0.0.1"
-scheme = "http"
-
 [[services]]
 room = "home"
+host = "127.0.0.1"
+scheme = "http"
 local_port = 10080
 password_hash = "$scrypt$v=1$n=32768,r=8,p=1$...$..."
 
 [[services]]
 room = "office"
+host = "127.0.0.1"
+scheme = "http"
 local_port = 10081
 password_hash = ""
 
@@ -173,7 +187,7 @@ public_key = "/opt/bifrost/keys/agent_ed25519.pub"
 timeout = 10
 ```
 
-同一个 client 进程会并行注册 `home` 和 `office`，分别转发到 `127.0.0.1:10080` 和 `127.0.0.1:10081`。room 不允许重复，名称必须是 1–64 个 ASCII 字母、数字、点、下划线或连字符并以字母/数字开头；端口范围必须是 1 到 65535。server 的 `public_keys` 必须允许该公钥进入对应 room。
+同一个 client 进程会并行注册 `home` 和 `office`，分别转发到各自 `[[services]]` 配置的目标。`scheme` 只能是 `http` 或 `https`；room 不允许重复，名称必须是 1–64 个 ASCII 字母、数字、点、下划线或连字符并以字母/数字开头；端口范围必须是 1 到 65535。旧配置中的全局 `[local_http]` 仍作为 host/scheme 的 fallback，但新配置建议直接写在每个 service 中。server 的 `public_keys` 必须允许该公钥进入对应 room。
 
 ## 安装与打包
 

@@ -2,13 +2,11 @@
 url = "wss://v.phenix.my:8443/signal"
 verify_tls = false
 
-[local_http]
-host = "127.0.0.1"
-scheme = "http"
-
 [[services]]
 room = "home"
 local_port = 18080
+host = "127.0.0.1"
+scheme = "http"
 # Empty means that Bifrost does not add browser authentication for this room.
 password_hash = ""
 

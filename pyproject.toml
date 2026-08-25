@@ -13,9 +13,11 @@ dependencies = [
     "aiohttp>=3.9",
     "aiortc>=1.15",
     "cryptography>=41",
+    "yarl>=1.17",
 ]
 
 [project.scripts]
+bifrost = "bifrost.__main__:main"
 bifrost-server = "bifrost.server:main"
 bifrost-client = "bifrost.client:cli"
 bifrost-hash-password = "bifrost.room_auth:main"

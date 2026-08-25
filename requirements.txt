@@ -2,3 +2,4 @@
 aiohttp>=3.9
 aiortc>=1.15
 cryptography>=41
+yarl>=1.17
