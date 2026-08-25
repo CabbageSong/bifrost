@@ -221,14 +221,38 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                 await pc.close()
 
 
-async def serve_agent(cfg, handler: MessageHandler, reconnect_delay=2, identity=None):
+async def serve_agent(
+    cfg,
+    handler: MessageHandler,
+    reconnect_delay=2,
+    max_reconnect_delay=60,
+    identity=None,
+):
     """Keep an agent registered, reconnecting after transient failures."""
     identity = identity or load_identity(cfg["auth"])
+    delay = reconnect_delay
     while True:
+        failed = False
         try:
             await run_agent(cfg, handler, identity)
+            delay = reconnect_delay
         except asyncio.CancelledError:
             raise
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            failed = True
+            log.warning(
+                "signaling connection failed room=%s; retrying in %s seconds: %s",
+                cfg["signal"]["room"],
+                delay,
+                exc,
+            )
         except Exception:
-            log.exception("agent loop stopped")
-        await asyncio.sleep(reconnect_delay)
+            failed = True
+            log.exception(
+                "agent session failed room=%s; retrying in %s seconds",
+                cfg["signal"]["room"],
+                delay,
+            )
+        await asyncio.sleep(delay)
+        if failed:
+            delay = min(delay * 2, max_reconnect_delay)
