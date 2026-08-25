@@ -15,6 +15,7 @@ from .protocol import (
     http_response,
     load_config,
     resolve_config_path,
+    validate_stun_urls,
 )
 from .room_auth import parse_password_hash, validate_room_name
 
@@ -31,6 +32,10 @@ def configured_services(cfg):
         log.warning(
             "[local_http] is deprecated; configure host and scheme in each service"
         )
+    webrtc = cfg.get("webrtc", {})
+    if not isinstance(webrtc, dict):
+        raise TypeError("webrtc must be a table")
+    stun_urls = validate_stun_urls(webrtc.get("stun_urls", []))
     seen_rooms = set()
     result = []
     for index, service in enumerate(services, 1):
@@ -82,6 +87,7 @@ def configured_services(cfg):
             "signal": signal,
             "auth": cfg["auth"],
             "browser_auth": {"password_hash": password_hash},
+            "webrtc": {"stun_urls": stun_urls},
         }
         result.append((room, target, service_cfg))
     return result

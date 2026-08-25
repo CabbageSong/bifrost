@@ -11,6 +11,8 @@ def test_static_page_is_packaged():
     page = files("bifrost").joinpath("static/index.html")
     text = page.read_text(encoding="utf-8")
     assert "Bifrost" in text
+    assert "bifrostConfig.stunUrls" in text
+    assert "stun.l.google.com" not in text
 
 
 def test_room_entry_and_login_pages_are_packaged():

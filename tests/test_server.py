@@ -22,7 +22,9 @@ def test_empty_tls_paths_select_http_and_partial_paths_fail():
         create_ssl_context({"cert": None, "key": None})
 
 
-async def authenticate_agent(client, private_key, room, password_hash=""):
+async def authenticate_agent(
+    client, private_key, room, password_hash="", expected_stun_urls=None
+):
     agent = await client.ws_connect(f"/signal?role=agent&room={room}")
     challenge_message = await agent.receive_json()
     challenge = base64.b64decode(challenge_message["challenge"])
@@ -35,7 +37,10 @@ async def authenticate_agent(client, private_key, room, password_hash=""):
             "password_hash": password_hash,
         }
     )
-    assert await agent.receive_json() == {"type": "auth_ok"}
+    response = await agent.receive_json()
+    assert response["type"] == "auth_ok"
+    if expected_stun_urls is not None:
+        assert response["stun_urls"] == expected_stun_urls
     return agent
 
 
@@ -48,6 +53,45 @@ def test_login_limiter_expires_failed_attempts():
     limiter.failed(key, now=102)
     assert limiter.retry_after(key, now=103) == 57
     assert limiter.retry_after(key, now=161) == 0
+
+
+def test_server_stun_urls_are_sent_to_agent_and_browser():
+    async def scenario():
+        rooms.clear()
+        private_key = Ed25519PrivateKey.generate()
+        stun_urls = [
+            "stun:stun.miwifi.com:3478",
+            "stun:stun.cloudflare.com:3478",
+        ]
+        app = create_app({
+            "auth": {"public_keys": [public_key_text(private_key.public_key())]},
+            "webrtc": {"stun_urls": stun_urls},
+        })
+        async with TestClient(TestServer(app)) as client:
+            agent = await authenticate_agent(
+                client,
+                private_key,
+                "home",
+                expected_stun_urls=stun_urls,
+            )
+            response = await client.get("/home")
+            text = await response.text()
+            assert response.status == 200
+            assert '"stunUrls":["stun:stun.miwifi.com:3478",' in text
+            assert '"stun:stun.cloudflare.com:3478"]' in text
+            await agent.close()
+        rooms.clear()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "stun_urls",
+    ["stun:example.com:3478", ["https://example.com"], ["stun:example.com:70000"]],
+)
+def test_server_rejects_invalid_stun_configuration(stun_urls):
+    with pytest.raises((TypeError, ValueError), match="stun"):
+        create_app({"auth": {"public_keys": []}, "webrtc": {"stun_urls": stun_urls}})
 
 
 def test_agent_registers_room_before_browser_can_join():

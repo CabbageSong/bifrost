@@ -16,6 +16,7 @@ from bifrost.auth import (
     verify_legacy_signature,
     verify_signature,
 )
+from bifrost.protocol import DEFAULT_STUN_URLS
 from bifrost.server import create_app, rooms
 
 
@@ -70,7 +71,10 @@ def test_agent_websocket_authentication(tmp_path):
                 'public_key': public_key_text(private_key.public_key()),
                 'signature': base64.b64encode(signature).decode('ascii'),
             })
-            assert await ws.receive_json() == {'type': 'auth_ok'}
+            assert await ws.receive_json() == {
+                'type': 'auth_ok',
+                'stun_urls': list(DEFAULT_STUN_URLS),
+            }
             assert rooms['home']['agent'] is not None
             await ws.close()
         rooms.clear()

@@ -2,6 +2,16 @@
 url = "wss://v.phenix.my:8443/signal"
 verify_tls = false
 
+[webrtc]
+# Client-side STUN takes precedence. Set to [] to use the server's list.
+# aiortc currently uses the first STUN URL, so keep the preferred one first.
+stun_urls = [
+  "stun:stun.miwifi.com:3478",
+  "stun:stun.chat.bilibili.com:3478",
+  "stun:stun.cloudflare.com:3478",
+  "stun:stun.l.google.com:19302",
+]
+
 [[services]]
 room = "home"
 local_port = 18080

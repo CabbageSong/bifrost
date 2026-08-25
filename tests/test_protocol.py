@@ -7,6 +7,7 @@ from bifrost.protocol import (
     http_request,
     http_response,
     resolve_config_path,
+    validate_stun_urls,
 )
 
 
@@ -25,6 +26,29 @@ def test_default_config_path_requires_component_toml(tmp_path):
 def test_default_config_path_rejects_unknown_component(tmp_path):
     with pytest.raises(ValueError, match="unsupported config component"):
         default_config_path("worker", tmp_path)
+
+
+def test_validate_stun_urls_accepts_udp_stun_hosts_and_empty_list():
+    urls = ["stun:stun.example.com:3478", "stun:[2001:db8::1]:3478"]
+
+    assert validate_stun_urls(urls) == urls
+    assert validate_stun_urls([]) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "stun:stun.example.com:3478",
+        ["https://stun.example.com"],
+        ["stun:stun.example.com:70000"],
+        ["stun:user@stun.example.com"],
+        ["stun:stun.example.com", "stun:stun.example.com"],
+        [1],
+    ],
+)
+def test_validate_stun_urls_rejects_invalid_values(value):
+    with pytest.raises((TypeError, ValueError), match="stun"):
+        validate_stun_urls(value)
 
 
 def test_http_request_defaults():

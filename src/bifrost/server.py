@@ -22,7 +22,12 @@ from .auth import (
     verify_legacy_signature,
     verify_signature,
 )
-from .protocol import load_config, resolve_config_path
+from .protocol import (
+    DEFAULT_STUN_URLS,
+    load_config,
+    resolve_config_path,
+    validate_stun_urls,
+)
 from .room_auth import (
     create_login_token,
     create_session_token,
@@ -43,6 +48,7 @@ SESSION_SECRET = web.AppKey("room_session_secret", bytes)
 SESSION_TTL = web.AppKey("room_session_ttl", int)
 LOGIN_LIMITER = web.AppKey("room_login_limiter", object)
 PASSWORD_WORKERS = web.AppKey("room_password_workers", asyncio.Semaphore)
+STUN_URLS = web.AppKey("stun_urls", list)
 
 STATIC = files("bifrost").joinpath("static")
 SHELL = STATIC.joinpath("index.html").read_text(encoding="utf-8")
@@ -221,7 +227,12 @@ async def page(request):
     if request.query_string:
         private_path += "?" + request.query_string
     config = _json_for_html(
-        {"room": room, "path": private_path, "protected": protected}
+        {
+            "room": room,
+            "path": private_path,
+            "protected": protected,
+            "stunUrls": request.app[STUN_URLS],
+        }
     )
     shell = SHELL.replace("/* BIFROST_CONFIG */", config, 1)
     return _html_response(
@@ -366,7 +377,10 @@ async def authenticate_agent(request, ws, room):
             await ws.send_json({"type": "auth_error", "error": "authentication failed"})
             await ws.close(code=1008, message=b"authentication failed")
         return None
-    await ws.send_json({"type": "auth_ok"})
+    await ws.send_json({
+        "type": "auth_ok",
+        "stun_urls": request.app[STUN_URLS],
+    })
     return entry, password_hash
 
 
@@ -528,6 +542,12 @@ def create_ssl_context(tls):
 def create_app(cfg):
     auth = cfg["auth"]
     browser_auth = cfg.get("browser_auth", {})
+    webrtc = cfg.get("webrtc", {})
+    if not isinstance(webrtc, dict):
+        raise TypeError("webrtc must be a table")
+    stun_urls = validate_stun_urls(
+        webrtc.get("stun_urls", list(DEFAULT_STUN_URLS))
+    )
     default_room = cfg.get("server", {}).get("room", "home")
     validate_room_name(default_room)
     app = web.Application(client_max_size=64 * 1024)
@@ -535,6 +555,7 @@ def create_app(cfg):
     app[AUTH_TIMEOUT] = float(auth.get("timeout", 10))
     app[DEFAULT_ROOM] = default_room
     app[SESSION_SECRET] = os.urandom(32)
+    app[STUN_URLS] = stun_urls
     app[SESSION_TTL] = _positive_int(
         browser_auth,
         "session_ttl",

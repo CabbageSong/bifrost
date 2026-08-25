@@ -199,16 +199,45 @@ def config(services):
 
 
 def test_configured_services_supports_multiple_rooms():
-    services = configured_services(config([
+    cfg = config([
         {'room': 'home', 'local_port': 10080},
         {'room': 'office', 'local_port': 10081},
-    ]))
+    ])
+    cfg['webrtc'] = {
+        'stun_urls': [
+            'stun:stun.miwifi.com:3478',
+            'stun:stun.cloudflare.com:3478',
+        ]
+    }
+    services = configured_services(cfg)
     assert [(room, target) for room, target, _ in services] == [
         ('home', 'http://127.0.0.1:10080'),
         ('office', 'http://127.0.0.1:10081'),
     ]
     assert services[0][2]['signal']['room'] == 'home'
     assert services[1][2]['signal']['room'] == 'office'
+    assert services[0][2]['webrtc']['stun_urls'] == cfg['webrtc']['stun_urls']
+
+
+def test_empty_client_stun_urls_are_preserved_for_server_fallback():
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    cfg['webrtc'] = {'stun_urls': []}
+
+    services = configured_services(cfg)
+
+    assert services[0][2]['webrtc']['stun_urls'] == []
+
+
+@pytest.mark.parametrize(
+    'stun_urls',
+    ['stun:example.com:3478', ['turn:example.com:3478'], [42]],
+)
+def test_client_rejects_invalid_stun_configuration(stun_urls):
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    cfg['webrtc'] = {'stun_urls': stun_urls}
+
+    with pytest.raises((TypeError, ValueError), match='stun'):
+        configured_services(cfg)
 
 
 def test_configured_services_rejects_duplicate_rooms():

@@ -31,6 +31,22 @@ server 默认按 `[tls]` 配置使用 HTTPS/WSS。如果 `tls.cert` 和 `tls.key
 
 内网 client 会使用 `config/client.toml` 中的 `[[services]]` 注册一个或多个 room。client 启动后，可以在 `https://<server>:8443/` 输入 room 名称，也可以直接打开 `https://<server>:8443/<room>`；未注册的 room 会被 server 拒绝。`/<room>/some/path?x=1` 这样的深链接会在登录成功后回到原地址。
 
+## STUN 配置
+
+server 和 client 都通过 `[webrtc].stun_urls` 配置 UDP STUN 地址。server 列表会注入浏览器页面，同时在 agent 认证成功后通过信令下发；浏览器不再在 HTML 中写死 STUN 地址。client 的非空列表优先于 server 下发列表，配置为空数组或省略 `[webrtc]` 时才使用 server 列表：
+
+```toml
+[webrtc]
+stun_urls = [
+  "stun:stun.miwifi.com:3478",
+  "stun:stun.chat.bilibili.com:3478",
+  "stun:stun.cloudflare.com:3478",
+  "stun:stun.l.google.com:19302",
+]
+```
+
+示例按国内端点优先、国外端点补充排列。公共 STUN 没有可用性承诺，生产环境建议替换为自建或有 SLA 的服务。浏览器会使用 server 提供的整个列表；当前 aiortc 每个 PeerConnection 只采用列表中的第一个 STUN，因此 client 侧要把首选端点放在第一项。server 显式配置 `stun_urls = []` 会让浏览器及采用 server 回退的 client 不使用 STUN，只保留 host candidate。
+
 首次 demo 使用自签名证书，浏览器需手动信任证书。页面内的导航栏会拦截内网页面的站内超链接，通过同一条 DataChannel 请求新 URI；浏览器真实地址保持在 Bifrost 页面，连接 ID/建立时间用于确认是否重连。
 
 浏览器 iframe 中的超链接、表单提交、`fetch`、`XMLHttpRequest` 和 `sendBeacon` 会被桥接到同一条 DataChannel。请求方法、请求头和请求体会传给内网 client，因此 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 及其他 aiohttp 接受的方法都可以转发；二进制请求体和响应体使用 Base64 保留原始字节。client 会为同一 WebRTC peer 复用 HTTP session，因此连接池和 Cookie 可以跨请求保留。HTML 解析器自动加载的图片、样式表、脚本等子资源，以及 WebSocket、同步 XHR 和流式请求，目前不经过该桥接。
@@ -166,6 +182,10 @@ server 会在启动时读取并校验 `public_keys` 数组，只接受 `ssh-ed25
 [signal]
 url = "wss://v.phenix.my:8443/signal"
 verify_tls = true
+
+[webrtc]
+# 空数组表示采用 server 通过认证响应下发的列表。
+stun_urls = []
 
 [[services]]
 room = "home"
