@@ -2,7 +2,7 @@ import argparse, asyncio, json, logging
 import aiohttp
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.sdp import candidate_from_sdp
-from .protocol import load_config, http_response
+from .protocol import decode_body, encode_body, load_config, http_response
 
 log = logging.getLogger("bifrost.client")
 
@@ -113,15 +113,27 @@ async def handle_http(ch, raw, target):
             for k, v in m.get("headers", {}).items()
             if k.lower() not in ("host", "content-length")
         }
+        if m.get("body_base64") is not None:
+            body = decode_body(m["body_base64"])
+        else:
+            body = (m.get("body") or "").encode("utf-8")
+        method = (m.get("method") or "GET").upper()
         async with aiohttp.ClientSession() as s:
             async with s.request(
-                m.get("method", "GET"),
+                method,
                 target.rstrip("/") + path,
                 headers=headers,
-                data=m.get("body", "").encode(),
+                data=body or None,
             ) as r:
-                body = (await r.read()).decode("utf-8", "replace")
-                result = http_response(rid, r.status, dict(r.headers), body)
+                response_body = await r.read()
+                result = http_response(
+                    rid,
+                    r.status,
+                    dict(r.headers),
+                    response_body.decode("utf-8", "replace"),
+                    body_base64=encode_body(response_body),
+                    status_text=r.reason or "",
+                )
         ch.send(json.dumps(result))
     except Exception as e:
         ch.send(

@@ -1,25 +1,113 @@
-<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bifrost</title>
-<style>html,body{margin:0;height:100%;font:14px system-ui}#nav{height:50px;display:flex;gap:6px;align-items:center;padding:8px;box-sizing:border-box;background:#fff;border-bottom:1px solid #ddd}#nav button{height:32px}#addr{flex:1;height:30px;border:1px solid #bbb;border-radius:16px;padding:0 12px;font-family:monospace}#status{height:32px;padding:8px 12px;box-sizing:border-box;background:#f6f7f9;border-bottom:1px solid #ddd;color:#555}.ok{color:#187a3d}.bad{color:#b22}#view{height:calc(100% - 82px);overflow:auto}#view iframe{border:0;width:100%;height:100%;min-height:calc(100vh - 82px)}#view pre{margin:0;padding:20px;white-space:pre-wrap}</style>
-<div id=nav><button id=back>‹</button><button id=forward>›</button><button id=refresh>↻</button><input id=addr><button id=go>访问</button></div><div id=status>正在建立 WebRTC 直连...</div><main id=view></main>
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bifrost</title>
+<style>
+html,body{margin:0;height:100%;font:14px system-ui}
+#nav{height:50px;display:flex;gap:6px;align-items:center;padding:8px;box-sizing:border-box;background:#fff;border-bottom:1px solid #ddd}
+#nav button{height:32px}
+#addr{flex:1;height:30px;border:1px solid #bbb;border-radius:16px;padding:0 12px;font-family:monospace}
+#status{height:32px;padding:8px 12px;box-sizing:border-box;background:#f6f7f9;border-bottom:1px solid #ddd;color:#555}
+.ok{color:#187a3d}.bad{color:#b22}
+#view{height:calc(100% - 82px);overflow:auto}
+#view iframe{border:0;width:100%;height:100%;min-height:calc(100vh - 82px)}
+#view pre{margin:0;padding:20px;white-space:pre-wrap}
+</style>
+<div id="nav"><button id="back">‹</button><button id="forward">›</button><button id="refresh">↻</button><input id="addr"><button id="go">访问</button></div>
+<div id="status">正在建立 WebRTC 直连...</div>
+<main id="view"></main>
 <script>
-let shellUrl=new URL(location.href),room=shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map();shellUrl.searchParams.delete('room');let currentPath=shellUrl.pathname+shellUrl.search,connectedAt=null,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;const $=x=>document.getElementById(x);
-function st(x,c=''){ $('status').textContent=x;$('status').className=c} function setAddr(p){$('addr').value=location.origin+p} function send(x){if(ws&&ws.readyState===1)ws.send(JSON.stringify(x))}
-function request(path){return new Promise((ok,no)=>{let id=++seq;pending.set(id,{ok,no});dc.send(JSON.stringify({type:'http_request',id,method:'GET',path,headers:{accept:'text/html,text/plain,application/json,*/*'}}));setTimeout(()=>{if(pending.has(id)){pending.delete(id);no(Error('内网服务响应超时'))}},20000)})}
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('正在通过 WebRTC 读取内网 '+path);try{render(await request(path));st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId+' · 已复用','ok')}catch(e){st('请求失败：'+e.message,'bad')}}
-function render(r){
-  let ct=((Object.entries(r.headers||{}).find(([k])=>k.toLowerCase()==='content-type')||['',''])[1]||'').toLowerCase();
-  if(ct.includes('text/html')){
-    let f=document.createElement('iframe');
-    f.sandbox='allow-scripts allow-forms allow-same-origin';
-    // Keep navigation in the parent Bifrost shell.  Do not let the
-    // untrusted page use target=_blank or navigate the iframe itself.
-    const hook='<scr'+'ipt>(function(){document.addEventListener("click",function(e){var a=e.target.closest&&e.target.closest("a[href]");if(!a)return;e.preventDefault();e.stopPropagation();parent.postMessage({type:"bifrost-nav",href:a.getAttribute("href")},"*");},true);document.addEventListener("auxclick",function(e){var a=e.target.closest&&e.target.closest("a[href]");if(a){e.preventDefault();e.stopPropagation();}},true);window.open=function(){return null};})();</scr'+'ipt>';
-    f.srcdoc=r.body.match(/<\/body>/i)?r.body.replace(/<\/body>/i,hook+'</body>'):r.body+hook;
-    view.replaceChildren(f);
-  }else{
-    let p=document.createElement('pre');p.textContent=r.body;view.replaceChildren(p)
-  }
+let shellUrl=new URL(location.href),room=shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null;
+shellUrl.searchParams.delete('room');
+let currentPath=shellUrl.pathname+shellUrl.search,connectedAt=null,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;
+const $=x=>document.getElementById(x);
+function st(x,c=''){ $('status').textContent=x;$('status').className=c }
+function setAddr(p){$('addr').value=location.origin+p}
+function send(x){if(ws&&ws.readyState===1)ws.send(JSON.stringify(x))}
+
+function request(method,path,headers={},body='',bodyBase64=null){
+  return new Promise((ok,no)=>{
+    let id=++seq;
+    if(!dc||dc.readyState!=='open'){no(Error('WebRTC 数据通道未连接'));return}
+    pending.set(id,{ok,no});
+    let msg={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{}};
+    if(bodyBase64!==null&&bodyBase64!==undefined)msg.body_base64=bodyBase64;else msg.body=body||'';
+    try{dc.send(JSON.stringify(msg))}catch(e){pending.delete(id);no(e);return}
+    setTimeout(()=>{if(pending.has(id)){pending.delete(id);no(Error('内网服务响应超时'))}},20000)
+  })
 }
-window.onmessage=e=>{if(e.data?.type==='bifrost-nav'){let href=e.data.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{let u=new URL(href,location.origin+currentPath);navigate(u.pathname+u.search+u.hash)}catch(_){}}};$('go').onclick=()=>navigate($('addr').value.replace(location.origin,'')||'/');$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>navigate(currentPath,false);setAddr(currentPath);
-async function boot(){try{if(!room)throw Error('访问地址缺少 room 参数');st('正在连接信令服务器...');ws=new WebSocket('wss://'+location.host+'/signal?role=client&room='+encodeURIComponent(room));await new Promise((ok,no)=>{ws.onopen=ok;ws.onerror=no});pc=new RTCPeerConnection();pc.onicecandidate=e=>{if(e.candidate)send({type:'candidate',candidate:e.candidate.toJSON()})};ws.onmessage=async e=>{let m=JSON.parse(e.data);if(m.type==='answer')await pc.setRemoteDescription(m.sdp);else if(m.type==='candidate'&&m.candidate)try{await pc.addIceCandidate(m.candidate)}catch(_){} };dc=pc.createDataChannel('http');dc.onmessage=e=>{let m=JSON.parse(e.data),p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};dc.onopen=async()=>{connectedAt=Date.now();st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId,'ok');await navigate(currentPath,false)};let o=await pc.createOffer();await pc.setLocalDescription(o);send({type:'offer',sdp:pc.localDescription})}catch(e){st('WebRTC 连接失败：'+e.message,'bad');view.innerHTML='<pre>连接失败，请确认 room 参数正确且 Bifrost client 已注册。</pre>'}}boot();
+
+function pathFor(value){
+  let u=new URL(value,location.origin+currentPath);
+  if(!/^https?:$/.test(u.protocol))throw Error('不支持的 URL 协议');
+  return u.pathname+u.search+u.hash
+}
+
+function frameHook(basePath){
+  const code=String.raw`(function(){
+    var BASE=${JSON.stringify(basePath)},calls=new Map(),next=0;
+    var NativeResponse=window.Response;
+    var NativeURLSearchParams=window.URLSearchParams,NativeFormData=window.FormData,NativeBlob=window.Blob;
+    function b64(buf){var a=new Uint8Array(buf),s='';for(var i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)}
+    function bytes(s){var b=atob(s||''),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
+    function headersObject(h){var o={};if(!h)return o;if(h.forEach)h.forEach(function(v,k){o[k]=v});else if(Array.isArray(h))h.forEach(function(x){o[x[0]]=x[1]});else Object.keys(h).forEach(function(k){o[k]=h[k]});return o}
+    function hasHeader(h,name){name=name.toLowerCase();return Object.keys(h).some(function(k){return k.toLowerCase()===name})}
+    function toPath(value){var fallback='http://bifrost.invalid'+BASE,b=document.querySelector('base[href]'),base=fallback;if(b)try{base=new URL(b.getAttribute('href'),fallback).href}catch(_){}var u=new URL(String(value),base);if(!/^https?:$/.test(u.protocol))throw Error('不支持的 URL 协议');return u.pathname+u.search+u.hash}
+    function ask(method,url,headers,body,bodyBase64,navigate){
+      return new Promise(function(resolve,reject){var id=++next;calls.set(id,{resolve:resolve,reject:reject});parent.postMessage({type:'bifrost-request',requestId:id,method:method||'GET',url:toPath(url),headers:headersObject(headers),body:body||'',body_base64:bodyBase64||null,navigate:!!navigate},'*')})
+    }
+    function payload(body){
+      if(body===undefined||body===null)return Promise.resolve({body:'',bodyBase64:null,contentType:null});
+      if(typeof body==='string')return Promise.resolve({body:body,bodyBase64:null,contentType:null});
+      if(body instanceof NativeURLSearchParams)return Promise.resolve({body:body.toString(),bodyBase64:null,contentType:'application/x-www-form-urlencoded;charset=UTF-8'});
+      if(body instanceof NativeBlob)return body.arrayBuffer().then(function(a){return {body:'',bodyBase64:b64(a),contentType:body.type||null}});
+      if(body instanceof ArrayBuffer)return Promise.resolve({body:'',bodyBase64:b64(body),contentType:null});
+      if(ArrayBuffer.isView(body))return Promise.resolve({body:'',bodyBase64:b64(body.buffer.slice(body.byteOffset,body.byteOffset+body.byteLength)),contentType:null});
+      if(body instanceof NativeFormData)return formPayload(body);
+      return Promise.resolve({body:String(body),bodyBase64:null,contentType:null});
+    }
+    function formPayload(fd){
+      var boundary='----bifrost-'+Math.random().toString(16).slice(2),parts=[];
+      fd.forEach(function(value,key){
+        if(value instanceof NativeBlob)parts.push(new NativeBlob(['--'+boundary+'\r\nContent-Disposition: form-data; name="'+key+'"; filename="'+(value.name||'blob')+'"\r\nContent-Type: '+(value.type||'application/octet-stream')+'\r\n\r\n',value,'\r\n']));
+        else parts.push('--'+boundary+'\r\nContent-Disposition: form-data; name="'+key+'"\r\n\r\n'+value+'\r\n')
+      });
+      parts.push('--'+boundary+'--\r\n');
+      return new NativeBlob(parts).arrayBuffer().then(function(a){return {body:'',bodyBase64:b64(a),contentType:'multipart/form-data; boundary='+boundary}})
+    }
+    function submittedFormPayload(fd,enctype){
+      enctype=(enctype||'application/x-www-form-urlencoded').split(';',1)[0].toLowerCase();
+      if(enctype==='application/x-www-form-urlencoded')return Promise.resolve({body:new NativeURLSearchParams(fd).toString(),bodyBase64:null,contentType:'application/x-www-form-urlencoded;charset=UTF-8'});
+      if(enctype==='text/plain'){var lines=[];fd.forEach(function(value,key){lines.push(key+'='+value)});return Promise.resolve({body:lines.join('\r\n')+'\r\n',bodyBase64:null,contentType:'text/plain'});
+      }
+      return formPayload(fd)
+    }
+    function responseFrom(r){var status=r.status||200,data=r&&r.body_base64?bytes(r.body_base64):(r&&r.body||'');if(status===204||status===205||status===304)data=null;return new NativeResponse(data,{status:status,statusText:r.status_text||'',headers:r.headers||{}})}
+    function responseText(r){return r&&r.body_base64?new TextDecoder().decode(bytes(r.body_base64)):(r&&r.body||'')}
+    window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-response')return;var p=calls.get(e.data.requestId);if(!p)return;calls.delete(e.data.requestId);if(e.data.error)p.reject(Error(e.data.error));else p.resolve(e.data.response||{})});
+    window.fetch=function(input,init){
+      init=init||{};var source=input instanceof Request?input:null,method=(init.method||(source&&source.method)||'GET').toUpperCase(),url=init.url||(source&&source.url)||input,h=headersObject(source&&source.headers);Object.assign(h,headersObject(init.headers));
+      var bodyPromise=init.body!==undefined?payload(init.body):(source&&method!=='GET'&&method!=='HEAD'?source.clone().arrayBuffer().then(payload):payload(null));
+      return bodyPromise.then(function(p){if(p.contentType&&!hasHeader(h,'content-type'))h['content-type']=p.contentType;return ask(method,url,h,p.body,p.bodyBase64,false)}).then(responseFrom)
+    };
+    function ProxyXHR(){this.readyState=0;this.status=0;this.statusText='';this.responseType='';this.responseURL='';this.response=null;this.responseText='';this._headers={};this._responseHeaders={};this._listeners={};this._aborted=false}
+    ProxyXHR.UNSENT=0;ProxyXHR.OPENED=1;ProxyXHR.HEADERS_RECEIVED=2;ProxyXHR.LOADING=3;ProxyXHR.DONE=4;
+    ProxyXHR.prototype.addEventListener=function(n,f){(this._listeners[n]||(this._listeners[n]=[])).push(f)};ProxyXHR.prototype.removeEventListener=function(n,f){this._listeners[n]=(this._listeners[n]||[]).filter(function(x){return x!==f})};ProxyXHR.prototype._emit=function(n){var self=this;(this._listeners[n]||[]).forEach(function(f){f.call(self)});if(typeof self['on'+n]==='function')self['on'+n]()};
+    ProxyXHR.prototype.open=function(method,url,async){if(async===false)throw Error('同步 XHR 不受支持');this._method=(method||'GET').toUpperCase();this._url=url;this._aborted=false;this.readyState=1;this._emit('readystatechange')};ProxyXHR.prototype.setRequestHeader=function(k,v){this._headers[k]=this._headers[k]?this._headers[k]+', '+v:String(v)};ProxyXHR.prototype.getResponseHeader=function(k){var key=Object.keys(this._responseHeaders).find(function(x){return x.toLowerCase()===String(k).toLowerCase()});return key?this._responseHeaders[key]:null};ProxyXHR.prototype.getAllResponseHeaders=function(){return Object.keys(this._responseHeaders).map(function(k){return k+': '+this._responseHeaders[k]+'\r\n'}).join('')};ProxyXHR.prototype.abort=function(){this._aborted=true};
+    ProxyXHR.prototype.send=function(body){var self=this;if(this.readyState!==1)throw Error('XHR 尚未 open');payload(body).then(function(p){if(p.contentType&&!hasHeader(self._headers,'content-type'))self._headers['content-type']=p.contentType;return ask(self._method,self._url,self._headers,p.body,p.bodyBase64,false)}).then(function(r){if(self._aborted)return;self.status=r.status||0;self.statusText=r.status_text||'';self.responseURL=self._url;self._responseHeaders=r.headers||{};self.readyState=2;self._emit('readystatechange');self.readyState=3;self._emit('readystatechange');self.responseText=responseText(r);if(self.responseType==='arraybuffer')self.response=bytes(r.body_base64||'').buffer;else if(self.responseType==='blob')self.response=new NativeBlob([r.body_base64?bytes(r.body_base64):self.responseText],{type:self.getResponseHeader('content-type')||''});else if(self.responseType==='json'){try{self.response=JSON.parse(self.responseText)}catch(_){self.response=null}}else self.response=self.responseText;self.readyState=4;self._emit('readystatechange');self._emit('load');self._emit('loadend')}).catch(function(){if(self._aborted)return;self.readyState=4;self._emit('readystatechange');self._emit('error');self._emit('loadend')})};
+    window.XMLHttpRequest=ProxyXHR;
+    document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(!a||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();e.stopPropagation();parent.postMessage({type:'bifrost-nav',href:toPath(a.getAttribute('href'))},'*')},true);document.addEventListener('auxclick',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a){e.preventDefault();e.stopPropagation()}},true);
+    document.addEventListener('submit',function(e){var form=e.target;if(!form||!form.action)return;e.preventDefault();e.stopPropagation();var method=(form.getAttribute('method')||'GET').toUpperCase(),h={},action=form.getAttribute('action')||BASE,fd=new NativeFormData(form);if(method==='GET'){var q=new NativeURLSearchParams(fd),u=toPath(action),join=u.indexOf('?')<0?'?':'&';parent.postMessage({type:'bifrost-nav',href:u+(q.toString()?join+q.toString():'')},'*');return}if(method==='HEAD'){ask('HEAD',action,h,'',null,true).catch(function(){});return}submittedFormPayload(fd,form.getAttribute('enctype')).then(function(p){if(p.contentType)h['content-type']=p.contentType;return ask(method,action,h,p.body,p.bodyBase64,true)}).catch(function(){})},true);
+    if(window.HTMLFormElement)HTMLFormElement.prototype.submit=function(){this.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))};
+    if(navigator.sendBeacon)navigator.sendBeacon=function(url,data){payload(data).then(function(p){return ask('POST',url,p.contentType?{'content-type':p.contentType}:{},p.body,p.bodyBase64,false)}).catch(function(){});return true};window.open=function(){return null};
+  })();`;
+  return '<scr'+'ipt>'+code+'</scr'+'ipt>'
+}
+
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('正在通过 WebRTC 读取内网 '+path);try{render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'}));st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId+' · 已复用','ok')}catch(e){st('请求失败：'+e.message,'bad')}}
+function render(r){let ct=((Object.entries(r.headers||{}).find(([k])=>k.toLowerCase()==='content-type')||['',''])[1]||'').toLowerCase();if(ct.includes('text/html')){let f=document.createElement('iframe');f.sandbox='allow-scripts allow-forms allow-same-origin';frame=f;let html=r.body_base64?new TextDecoder().decode(bytesFor(r.body_base64)):r.body||'';f.srcdoc=frameHook(currentPath)+html;view.replaceChildren(f)}else{let p=document.createElement('pre');p.textContent=r.body||'';view.replaceChildren(p);frame=null}}
+function bytesFor(s){let b=atob(s||''),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
+window.onmessage=async e=>{if(!e.data)return;if(e.data.type==='bifrost-nav'){let href=e.data.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}if(e.data.type!=='bifrost-request'||!frame||e.source!==frame.contentWindow)return;let q=e.data;try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body||'',q.body_base64);if(q.navigate){currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);render(r);return}frame.contentWindow.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){frame.contentWindow.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}};
+$('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>navigate(currentPath,false);setAddr(currentPath);
+async function boot(){try{if(!room)throw Error('访问地址缺少 room 参数');st('正在连接信令服务器...');ws=new WebSocket('wss://'+location.host+'/signal?role=client&room='+encodeURIComponent(room));await new Promise((ok,no)=>{ws.onopen=ok;ws.onerror=no});pc=new RTCPeerConnection();pc.onicecandidate=e=>{if(e.candidate)send({type:'candidate',candidate:e.candidate.toJSON()})};ws.onmessage=async e=>{let m=JSON.parse(e.data);if(m.type==='answer')await pc.setRemoteDescription(m.sdp);else if(m.type==='candidate'&&m.candidate)try{await pc.addIceCandidate(m.candidate)}catch(_){}};dc=pc.createDataChannel('http');dc.onmessage=e=>{let m=JSON.parse(e.data),p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};dc.onopen=async()=>{connectedAt=Date.now();st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId,'ok');await navigate(currentPath,false)};let o=await pc.createOffer();await pc.setLocalDescription(o);send({type:'offer',sdp:pc.localDescription})}catch(e){st('WebRTC 连接失败：'+e.message,'bad');view.innerHTML='<pre>连接失败，请确认 room 参数正确且 Bifrost client 已注册。</pre>'}}boot();
 </script>
