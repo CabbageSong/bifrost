@@ -21,3 +21,5 @@ def test_static_page_bridges_http_methods_and_browser_apis():
     assert "document.addEventListener('submit'" in text
     assert "navigator.sendBeacon=function" in text
     assert "body_base64" in text
+    assert "formmethod" in text
+    assert "response_url" in text

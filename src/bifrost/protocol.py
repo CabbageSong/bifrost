@@ -32,6 +32,7 @@ def http_response(
     error=None,
     body_base64=None,
     status_text="",
+    response_url="",
 ):
     result = {
         "type": "http_response",
@@ -44,6 +45,8 @@ def http_response(
         result["body_base64"] = body_base64
     if status_text:
         result["status_text"] = status_text
+    if response_url:
+        result["response_url"] = response_url
     if error:
         result["error"] = error
     return result

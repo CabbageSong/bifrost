@@ -42,6 +42,8 @@ def test_http_response_can_carry_binary_body_and_status_text():
         {"content-type": "image/png"},
         body_base64=encoded,
         status_text="Created",
+        response_url="/images/logo.png",
     )
     assert response["body_base64"] == encoded
     assert response["status_text"] == "Created"
+    assert response["response_url"] == "/images/logo.png"

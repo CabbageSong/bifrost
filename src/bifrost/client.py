@@ -10,7 +10,10 @@ log = logging.getLogger("bifrost.client")
 async def run(cfg):
     signal = cfg["signal"]
     target = cfg["local_http"]["target"]
-    async with aiohttp.ClientSession() as session:
+    # One session keeps upstream cookies and pooled connections for the life of
+    # the peer. unsafe=True is needed for the common 127.0.0.1 target.
+    cookie_jar = aiohttp.CookieJar(unsafe=True)
+    async with aiohttp.ClientSession(cookie_jar=cookie_jar) as session:
         async with session.ws_connect(
             signal["url"],
             params={"role": "agent", "room": signal["room"]},
@@ -59,7 +62,7 @@ async def run(cfg):
 
                     @ch.on("message")
                     def message(raw):
-                        asyncio.create_task(handle_http(ch, raw, target))
+                        asyncio.create_task(handle_http(ch, raw, target, session))
 
                 return pc
 
@@ -100,7 +103,7 @@ async def run(cfg):
                 await pc.close()
 
 
-async def handle_http(ch, raw, target):
+async def handle_http(ch, raw, target, session):
     try:
         m = json.loads(raw)
         rid = m.get("id")
@@ -118,22 +121,22 @@ async def handle_http(ch, raw, target):
         else:
             body = (m.get("body") or "").encode("utf-8")
         method = (m.get("method") or "GET").upper()
-        async with aiohttp.ClientSession() as s:
-            async with s.request(
-                method,
-                target.rstrip("/") + path,
-                headers=headers,
-                data=body or None,
-            ) as r:
-                response_body = await r.read()
-                result = http_response(
-                    rid,
-                    r.status,
-                    dict(r.headers),
-                    response_body.decode("utf-8", "replace"),
-                    body_base64=encode_body(response_body),
-                    status_text=r.reason or "",
-                )
+        async with session.request(
+            method,
+            target.rstrip("/") + path,
+            headers=headers,
+            data=body or None,
+        ) as r:
+            response_body = await r.read()
+            result = http_response(
+                rid,
+                r.status,
+                dict(r.headers),
+                response_body.decode("utf-8", "replace"),
+                body_base64=encode_body(response_body),
+                status_text=r.reason or "",
+                response_url=r.url.raw_path_qs,
+            )
         ch.send(json.dumps(result))
     except Exception as e:
         ch.send(
