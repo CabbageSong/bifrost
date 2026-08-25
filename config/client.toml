@@ -9,11 +9,18 @@ scheme = "http"
 [[services]]
 room = "home"
 local_port = 18080
+# Empty means that Bifrost does not add browser authentication for this room.
+password_hash = ""
+
+# For a protected room, configure a generated password hash:
+# password_hash = "$scrypt$v=1$n=32768,r=8,p=1$...$..."
+# Generate it with: bifrost-hash-password
 
 # Add more room-to-port mappings as needed.
 # [[services]]
 # room = "office"
 # local_port = 10080
+# password_hash = ""
 
 [auth]
 # Generate with: ssh-keygen -t ed25519 -f /opt/bifrost/keys/agent_ed25519

@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from bifrost.client import handle_http
+from bifrost.client import configured_services, handle_http
 from bifrost.protocol import decode_body, encode_body
 
 
@@ -16,6 +16,38 @@ class Channel:
 
     def send(self, raw):
         self.messages.append(json.loads(raw))
+
+
+def test_empty_or_missing_password_hash_means_public_room():
+    base = {
+        "signal": {"url": "wss://example.test/signal"},
+        "auth": {},
+        "services": [
+            {"room": "empty", "local_port": 8001, "password_hash": ""},
+            {"room": "missing", "local_port": 8002},
+        ],
+    }
+    services = configured_services(base)
+
+    assert services[0][2]["browser_auth"]["password_hash"] == ""
+    assert services[1][2]["browser_auth"]["password_hash"] == ""
+
+
+def test_service_rejects_plaintext_passwords():
+    with pytest.raises(ValueError, match="unsupported password"):
+        configured_services(
+            {
+                "signal": {},
+                "auth": {},
+                "services": [
+                    {
+                        "room": "home",
+                        "local_port": 8001,
+                        "password": "secret",
+                    }
+                ],
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -130,7 +162,6 @@ def test_handle_http_reuses_cookies_and_reports_redirect_url():
         assert decode_body(account["body_base64"]) == b"active"
 
     asyncio.run(scenario())
-from bifrost.client import configured_services
 
 
 def config(services):

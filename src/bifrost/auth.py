@@ -15,7 +15,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-_AUTH_DOMAIN = b"bifrost-agent-auth-v1\0"
+_AUTH_DOMAIN = b"bifrost-agent-auth-v2\0"
+_LEGACY_AUTH_DOMAIN = b"bifrost-agent-auth-v1\0"
 _KEY_TYPE = "ssh-ed25519"
 _ROOM_OPTION = re.compile(r'(?:^|,)\s*room\s*=\s*(?:"([^"]+)"|([^,\s]+))')
 
@@ -49,14 +50,39 @@ def fingerprint(public_key: Ed25519PublicKey) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
-def auth_payload(room: str, challenge: bytes) -> bytes:
-    """Build an unambiguous, domain-separated message for an agent to sign."""
+def auth_payload(room: str, challenge: bytes, password_hash: str = "") -> bytes:
+    """Build a signed agent registration, including the room access policy."""
+    room_bytes = room.encode("utf-8")
+    password_hash_bytes = password_hash.encode("ascii")
+    if len(room_bytes) > 65535:
+        raise ValueError("room name is too long")
+    if len(password_hash_bytes) > 65535:
+        raise ValueError("room password hash is too long")
+    if len(challenge) != 32:
+        raise ValueError("authentication challenge must be 32 bytes")
+    return (
+        _AUTH_DOMAIN
+        + len(room_bytes).to_bytes(2, "big")
+        + room_bytes
+        + len(password_hash_bytes).to_bytes(2, "big")
+        + password_hash_bytes
+        + challenge
+    )
+
+
+def legacy_auth_payload(room: str, challenge: bytes) -> bytes:
+    """Build the v1 open-room payload for rolling-upgrade compatibility."""
     room_bytes = room.encode("utf-8")
     if len(room_bytes) > 65535:
         raise ValueError("room name is too long")
     if len(challenge) != 32:
         raise ValueError("authentication challenge must be 32 bytes")
-    return _AUTH_DOMAIN + len(room_bytes).to_bytes(2, "big") + room_bytes + challenge
+    return (
+        _LEGACY_AUTH_DOMAIN
+        + len(room_bytes).to_bytes(2, "big")
+        + room_bytes
+        + challenge
+    )
 
 
 def load_private_key(path: str | Path, password: str | None = None) -> Ed25519PrivateKey:
@@ -144,11 +170,30 @@ def verify_signature(
     room: str,
     challenge: bytes,
     signature: bytes,
+    password_hash: str = "",
 ) -> bool:
     if not entry.permits(room):
         return False
     try:
-        entry.public_key.verify(signature, auth_payload(room, challenge))
-    except InvalidSignature:
+        entry.public_key.verify(
+            signature, auth_payload(room, challenge, password_hash)
+        )
+    except (InvalidSignature, UnicodeEncodeError, ValueError):
+        return False
+    return True
+
+
+def verify_legacy_signature(
+    entry: AuthorizedKey,
+    room: str,
+    challenge: bytes,
+    signature: bytes,
+) -> bool:
+    """Verify a pre-room-password agent; these agents can only register open rooms."""
+    if not entry.permits(room):
+        return False
+    try:
+        entry.public_key.verify(signature, legacy_auth_payload(room, challenge))
+    except (InvalidSignature, ValueError):
         return False
     return True

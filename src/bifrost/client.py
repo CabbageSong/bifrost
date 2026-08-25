@@ -9,6 +9,7 @@ import aiohttp
 
 from .agent import load_identity, serve_agent
 from .protocol import decode_body, encode_body, http_response, load_config
+from .room_auth import parse_password_hash, validate_room_name
 
 log = logging.getLogger("bifrost.client")
 
@@ -25,8 +26,10 @@ def configured_services(cfg):
     result = []
     for index, service in enumerate(services, 1):
         room = str(service.get("room", "")).strip()
-        if not room:
-            raise ValueError(f"services entry {index} requires room")
+        try:
+            validate_room_name(room)
+        except ValueError as exc:
+            raise ValueError(f"invalid room in services entry {index}: {exc}") from exc
         if room in seen_rooms:
             raise ValueError(f"duplicate room in client config: {room}")
         try:
@@ -36,9 +39,27 @@ def configured_services(cfg):
         if not 1 <= port <= 65535:
             raise ValueError(f"invalid local_port for room {room}: {port}")
         seen_rooms.add(room)
+        if "password" in service:
+            raise ValueError(
+                f"services entry {index} uses unsupported password; use password_hash"
+            )
+        password_hash = service.get("password_hash", "")
+        if password_hash:
+            try:
+                parse_password_hash(password_hash)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid password_hash for room {room}: {exc}"
+                ) from exc
+        elif "password_hash" in service and not isinstance(password_hash, str):
+            raise ValueError(f"password_hash for room {room} must be a string")
         signal = dict(cfg["signal"])
         signal["room"] = room
-        service_cfg = {"signal": signal, "auth": cfg["auth"]}
+        service_cfg = {
+            "signal": signal,
+            "auth": cfg["auth"],
+            "browser_auth": {"password_hash": password_hash},
+        }
         result.append((room, f"{scheme}://{host}:{port}", service_cfg))
     return result
 

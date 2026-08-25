@@ -27,7 +27,9 @@ log = logging.getLogger("bifrost.agent")
 MessageHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 
-async def authenticate(sig, room, private_key, public_key, timeout=10):
+async def authenticate(
+    sig, room, private_key, public_key, timeout=10, password_hash=""
+):
     msg = await sig.receive(timeout=timeout)
     if msg.type != aiohttp.WSMsgType.TEXT:
         raise PermissionError("server closed before authentication")
@@ -38,13 +40,14 @@ async def authenticate(sig, room, private_key, public_key, timeout=10):
         if challenge_message.get("room") != room:
             raise ValueError("authentication room mismatch")
         challenge = base64.b64decode(challenge_message["challenge"], validate=True)
-        signature = private_key.sign(auth_payload(room, challenge))
+        signature = private_key.sign(auth_payload(room, challenge, password_hash))
     except (KeyError, TypeError, ValueError) as exc:
         raise PermissionError("invalid authentication challenge") from exc
     await sig.send_json({
         "type": "auth_response",
         "public_key": public_key_text(public_key),
         "signature": base64.b64encode(signature).decode("ascii"),
+        "password_hash": password_hash,
     })
     reply = await sig.receive(timeout=timeout)
     if reply.type != aiohttp.WSMsgType.TEXT:
@@ -84,6 +87,7 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
     """Run one authenticated signaling/WebRTC session using ``handler``."""
     signal = cfg["signal"]
     auth = cfg["auth"]
+    password_hash = cfg.get("browser_auth", {}).get("password_hash", "")
     private_key, public_key = identity or load_identity(auth)
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(
@@ -94,7 +98,12 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
             max_msg_size=8 * 1024 * 1024,
         ) as sig:
             await authenticate(
-                sig, signal["room"], private_key, public_key, auth.get("timeout", 10)
+                sig,
+                signal["room"],
+                private_key,
+                public_key,
+                auth.get("timeout", 10),
+                password_hash,
             )
             pc = None
             pending = []
@@ -170,6 +179,11 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                         await pc.addIceCandidate(candidate)
                     else:
                         pending.append(candidate)
+                elif message.get("type") == "client_offline":
+                    pending = []
+                    if pc:
+                        await pc.close()
+                        pc = None
             if pc:
                 await pc.close()
 

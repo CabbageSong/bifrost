@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
@@ -9,10 +8,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from bifrost.auth import (
     auth_payload,
+    legacy_auth_payload,
     load_authorized_keys,
     load_private_key,
     public_key_bytes,
     public_key_text,
+    verify_legacy_signature,
     verify_signature,
 )
 from bifrost.server import create_app, rooms
@@ -119,3 +120,17 @@ def test_inline_public_keys_accept_pub_format(tmp_path):
     # An unrestricted duplicate remains unrestricted, as with authorized_keys.
     assert entry.permits('home')
     assert entry.permits('office')
+
+
+def test_agent_signature_binds_room_password_policy():
+    key = Ed25519PrivateKey.generate()
+    entry = next(iter(load_authorized_keys([public_key_text(key.public_key())]).values()))
+    challenge = b"c" * 32
+    signature = key.sign(auth_payload("home", challenge, "hash-one"))
+
+    assert verify_signature(entry, "home", challenge, signature, "hash-one")
+    assert not verify_signature(entry, "home", challenge, signature, "hash-two")
+
+    old_signature = key.sign(legacy_auth_payload("home", challenge))
+    assert verify_legacy_signature(entry, "home", challenge, old_signature)
+    assert not verify_signature(entry, "home", challenge, old_signature)

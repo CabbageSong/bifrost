@@ -14,3 +14,10 @@ public_keys = [
   # "room=\"home\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... home-agent",
 ]
 timeout = 10
+
+[browser_auth]
+# Browser sessions are kept in signed Secure/HttpOnly cookies.
+session_ttl = 43200
+max_attempts = 5
+attempt_window = 60
+password_workers = 2
