@@ -10,7 +10,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from bifrost.auth import auth_payload, public_key_text
 from bifrost.room_auth import hash_password
-from bifrost.server import LoginLimiter, create_app, rooms
+from bifrost.server import LoginLimiter, create_app, create_ssl_context, rooms
+
+
+def test_empty_tls_paths_select_http_and_partial_paths_fail():
+    assert create_ssl_context({"cert": "", "key": ""}) is None
+    assert create_ssl_context({}) is None
+    with pytest.raises(ValueError, match="both be empty or both be set"):
+        create_ssl_context({"cert": "/tmp/cert.pem", "key": ""})
+    with pytest.raises(TypeError, match="must be strings"):
+        create_ssl_context({"cert": None, "key": None})
 
 
 async def authenticate_agent(client, private_key, room, password_hash=""):
@@ -153,7 +162,7 @@ def test_room_portal_and_protected_room_login():
             assert success.status == 302
             assert success.headers["Location"] == "/home/admin?tab=users"
             set_cookie = success.headers["Set-Cookie"]
-            assert "Secure" in set_cookie
+            assert "Secure" not in set_cookie
             assert "HttpOnly" in set_cookie
             assert "SameSite=Lax" in set_cookie
             parsed_cookie = SimpleCookie()

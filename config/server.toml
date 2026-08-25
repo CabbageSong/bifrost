@@ -4,6 +4,7 @@ port = 8443
 room = "home"
 
 [tls]
+# Set both to "" to run plain HTTP (use only on a trusted network).
 cert = "/opt/bifrost/certs/fullchain.pem"
 key = "/opt/bifrost/certs/privkey.pem"
 

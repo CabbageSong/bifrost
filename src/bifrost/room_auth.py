@@ -109,10 +109,11 @@ def credential_id(encoded: str) -> str:
     return _b64encode(hashlib.sha256(encoded.encode("utf-8")).digest()[:18])
 
 
-def session_cookie_name(room: str) -> str:
+def session_cookie_name(room: str, *, secure: bool = True) -> str:
     """Use one host-only cookie per room so several rooms can stay logged in."""
     room_id = hashlib.sha256(room.encode("utf-8")).hexdigest()[:24]
-    return f"__Host-bifrost-{room_id}"
+    prefix = "__Host-bifrost-" if secure else "bifrost-"
+    return prefix + room_id
 
 
 def create_login_token(

@@ -156,7 +156,7 @@ def _room_state(room):
 
 
 def _session_expiry(request, room, password_hash):
-    token = request.cookies.get(session_cookie_name(room))
+    token = request.cookies.get(session_cookie_name(room, secure=request.secure))
     if not token:
         return None
     return verify_session_token(
@@ -297,10 +297,10 @@ async def login(request):
     response = web.HTTPFound(destination)
     response.headers.update(_security_headers())
     response.set_cookie(
-        session_cookie_name(room),
+        session_cookie_name(room, secure=request.secure),
         token,
         max_age=request.app[SESSION_TTL],
-        secure=True,
+        secure=request.secure,
         httponly=True,
         samesite="Lax",
         path="/",
@@ -510,6 +510,21 @@ def _positive_int(config, name, default, *, minimum=1, maximum=None):
     return value
 
 
+def create_ssl_context(tls):
+    """Build the HTTPS context, or return None when both TLS paths are empty."""
+    cert = tls.get("cert", "")
+    key = tls.get("key", "")
+    if not isinstance(cert, str) or not isinstance(key, str):
+        raise TypeError("tls.cert and tls.key must be strings")
+    if not cert and not key:
+        return None
+    if not cert or not key:
+        raise ValueError("tls.cert and tls.key must both be empty or both be set")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    return context
+
+
 def create_app(cfg):
     auth = cfg["auth"]
     browser_auth = cfg.get("browser_auth", {})
@@ -547,8 +562,7 @@ def main():
     cfg = load_config(args.config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app = create_app(cfg)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(cfg["tls"]["cert"], cfg["tls"]["key"])
+    context = create_ssl_context(cfg.get("tls", {}))
     web.run_app(
         app,
         host=cfg["server"]["bind"],

@@ -54,6 +54,7 @@ def test_login_form_token_is_bound_and_short_lived():
 def test_room_names_and_cookie_names_are_safe():
     assert validate_room_name("home-1.example") == "home-1.example"
     assert session_cookie_name("home").startswith("__Host-bifrost-")
+    assert session_cookie_name("home", secure=False).startswith("bifrost-")
     for value in ("", "../home", "home/path", "signal", "房间"):
         with pytest.raises(ValueError):
             validate_room_name(value)
