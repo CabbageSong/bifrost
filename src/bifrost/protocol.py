@@ -191,6 +191,15 @@ def legacy_stun_urls(ice_servers):
     ]
 
 
+def validate_ice_port(value, field="ice_port"):
+    """Validate a fixed local UDP port used for one agent ICE transport."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{field} must be an integer")
+    if not 1 <= value <= 65535:
+        raise ValueError(f"{field} must be between 1 and 65535")
+    return value
+
+
 def http_request(request_id, method, path, headers=None, body="", body_base64=None):
     result = {
         "type": "http_request",

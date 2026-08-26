@@ -38,3 +38,14 @@ def test_static_page_bridges_http_methods_and_browser_apis():
     assert "response_url" in text
     assert "allow-scripts allow-forms'" in text
     assert "allow-same-origin" not in text
+
+
+def test_static_page_logs_ice_diagnostics_without_turn_secrets():
+    text = files("bifrost").joinpath("static/index.html").read_text(encoding="utf-8")
+    assert "onicecandidateerror" in text
+    assert "onicegatheringstatechange" in text
+    assert "remote answer candidates" in text
+    assert "candidate-pair" in text
+    assert "pc.getStats()" in text
+    assert "unhandledrejection" in text
+    assert "credential:server.credential?'configured':undefined" in text

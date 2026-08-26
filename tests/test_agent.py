@@ -1,10 +1,72 @@
 import asyncio
 import logging
+import socket
 
 import aiohttp
 import pytest
+from aiortc import RTCConfiguration, RTCPeerConnection
 
 import bifrost.agent as agent
+
+
+def test_bind_ice_port_is_task_local():
+    async def scenario():
+        probes = []
+        ports = []
+        for _ in range(2):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.bind(("127.0.0.1", 0))
+            probes.append(probe)
+            ports.append(probe.getsockname()[1])
+        for probe in probes:
+            probe.close()
+
+        async def bind(port):
+            with agent.bind_ice_port(port):
+                transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                    asyncio.DatagramProtocol,
+                    local_addr=("127.0.0.1", 0),
+                )
+            return transport
+
+        transports = await asyncio.gather(*(bind(port) for port in ports))
+        try:
+            assert [
+                transport.get_extra_info("sockname")[1] for transport in transports
+            ] == ports
+        finally:
+            for transport in transports:
+                transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_answer_uses_fixed_ice_host_candidate_port():
+    async def scenario():
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("0.0.0.0", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        browser = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        local_agent = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        browser.createDataChannel("http")
+        try:
+            await browser.setLocalDescription(await browser.createOffer())
+            await local_agent.setRemoteDescription(browser.localDescription)
+            with agent.bind_ice_port(port):
+                await local_agent.setLocalDescription(await local_agent.createAnswer())
+            candidates = (
+                local_agent.sctp.transport.transport.iceGatherer.getLocalCandidates()
+            )
+            assert {
+                candidate.port for candidate in candidates if candidate.type == "host"
+            } == {port}
+        finally:
+            await browser.close()
+            await local_agent.close()
+
+    asyncio.run(scenario())
 
 
 def test_serve_agent_backs_off_connection_failures_without_tracebacks(

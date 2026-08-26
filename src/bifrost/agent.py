@@ -7,6 +7,8 @@ import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import aiohttp
@@ -26,10 +28,78 @@ from .auth import (
     public_key_bytes,
     public_key_text,
 )
-from .protocol import http_response, validate_ice_servers, webrtc_ice_servers
+from .protocol import (
+    http_response,
+    validate_ice_port,
+    validate_ice_servers,
+    webrtc_ice_servers,
+)
 
 log = logging.getLogger("bifrost.agent")
 MessageHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
+_ice_port = ContextVar("bifrost_ice_port", default=None)
+_LOOP_PATCH_MARKER = "_bifrost_original_create_datagram_endpoint"
+
+
+def _install_ice_port_binding(loop):
+    """Make aioice's port-zero bind honor a task-local fixed ICE port."""
+    if hasattr(loop, _LOOP_PATCH_MARKER):
+        return
+    original = loop.create_datagram_endpoint
+
+    async def create_datagram_endpoint(protocol_factory, *args, **kwargs):
+        port = _ice_port.get()
+        local_addr = kwargs.get("local_addr")
+        if port is not None and local_addr and local_addr[1] == 0:
+            kwargs["local_addr"] = (local_addr[0], port, *local_addr[2:])
+        return await original(protocol_factory, *args, **kwargs)
+
+    setattr(loop, _LOOP_PATCH_MARKER, original)
+    loop.create_datagram_endpoint = create_datagram_endpoint
+
+
+@contextmanager
+def bind_ice_port(port):
+    """Apply ``port`` only to UDP endpoints created in the current task."""
+    if port is None:
+        yield
+        return
+    loop = asyncio.get_running_loop()
+    _install_ice_port_binding(loop)
+    token = _ice_port.set(port)
+    try:
+        yield
+    finally:
+        _ice_port.reset(token)
+
+
+def _check_ice_port(pc, port, room):
+    if port is None:
+        return
+    candidates = pc.sctp.transport.transport.iceGatherer.getLocalCandidates()
+    host_ports = {candidate.port for candidate in candidates if candidate.type == "host"}
+    if host_ports != {port}:
+        raise OSError(
+            f"could not bind ICE UDP port {port} for room {room}; "
+            f"observed host ports: {sorted(host_ports)}"
+        )
+    public_ports = {
+        candidate.port for candidate in candidates if candidate.type == "srflx"
+    }
+    log.info(
+        "ICE UDP port room=%s local=%s public=%s",
+        room,
+        port,
+        sorted(public_ports),
+    )
+    if public_ports and public_ports != {port}:
+        log.warning(
+            "NAT remapped ICE UDP port room=%s local=%s public=%s; "
+            "configure a static same-port UDP mapping",
+            room,
+            port,
+            sorted(public_ports),
+        )
 
 
 async def authenticate(
@@ -124,16 +194,23 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
             )
             configured_ice_servers = webrtc_ice_servers(cfg.get("webrtc", {}))
             ice_servers = configured_ice_servers or server_ice_servers
+            configured_ice_port = cfg.get("webrtc", {}).get("ice_port")
+            ice_port = (
+                validate_ice_port(configured_ice_port, "webrtc.ice_port")
+                if configured_ice_port is not None
+                else None
+            )
             configuration = RTCConfiguration(
                 iceServers=[RTCIceServer(**server) for server in ice_servers]
             )
             urls = [url for server in ice_servers for url in server["urls"]]
             has_turn = any(url.startswith(("turn:", "turns:")) for url in urls)
             log.info(
-                "using %s ICE configuration urls=%s turn=%s",
+                "using %s ICE configuration urls=%s turn=%s local_port=%s",
                 "client" if configured_ice_servers else "server",
                 urls,
                 has_turn,
+                ice_port or "random",
             )
             pc = None
             pending = []
@@ -206,7 +283,9 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                             pass
                     pending = []
                     answer = await pc.createAnswer()
-                    await pc.setLocalDescription(answer)
+                    with bind_ice_port(ice_port):
+                        await pc.setLocalDescription(answer)
+                    _check_ice_port(pc, ice_port, signal["room"])
                     await send({
                         "type": "answer",
                         "sdp": {

@@ -241,6 +241,40 @@ def test_client_accepts_turn_ice_servers():
     assert services[0][2]['webrtc'] == cfg['webrtc']
 
 
+def test_client_passes_a_distinct_fixed_ice_port_to_each_room():
+    cfg = config([
+        {'room': 'home', 'local_port': 10080, 'ice_port': 40000},
+        {'room': 'office', 'local_port': 10081, 'ice_port': 40001},
+    ])
+
+    services = configured_services(cfg)
+
+    assert services[0][2]['webrtc']['ice_port'] == 40000
+    assert services[1][2]['webrtc']['ice_port'] == 40001
+
+
+@pytest.mark.parametrize('ice_port', [0, 65536, True, 40000.5, '40000'])
+def test_client_rejects_invalid_fixed_ice_port(ice_port):
+    cfg = config([{
+        'room': 'home',
+        'local_port': 10080,
+        'ice_port': ice_port,
+    }])
+
+    with pytest.raises((TypeError, ValueError), match='ice_port'):
+        configured_services(cfg)
+
+
+def test_client_rejects_duplicate_fixed_ice_ports():
+    cfg = config([
+        {'room': 'home', 'local_port': 10080, 'ice_port': 40000},
+        {'room': 'office', 'local_port': 10081, 'ice_port': 40000},
+    ])
+
+    with pytest.raises(ValueError, match='duplicate ice_port'):
+        configured_services(cfg)
+
+
 @pytest.mark.parametrize(
     'stun_urls',
     ['stun:example.com:3478', ['turn:example.com:3478'], [42]],

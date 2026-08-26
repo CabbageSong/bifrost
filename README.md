@@ -53,6 +53,17 @@ credential = "replace-with-a-strong-secret"
 
 旧的 `stun_urls = [...]` 配置仍然兼容，但只能配置 STUN。公共 STUN 只能发现公网映射，不能让对称 NAT、运营商 CGNAT 或严格防火墙必然打洞成功。日志中若候选检查持续失败，且没有 `relay` candidate，就需要 TURN；继续增加公共 STUN 地址通常不能解决。
 
+agent 侧可以为每个 room 固定一个本地 ICE UDP 端口：
+
+```toml
+[[services]]
+room = "home"
+local_port = 18080
+ice_port = 40000
+```
+
+此时应放行 `40000/udp`。如果公网 IP 直接配置在 agent 网卡上，防火墙放行即可；如果 agent 日志仍显示私网地址，必须再配置同端口静态映射，例如 `116.230.250.209:40000/udp -> 10.21.0.1:40000/udp`。启动后日志会同时打印 `local=40000` 和 STUN 发现的 `public=[...]`；若公网端口不是 `40000`，说明上级 NAT 仍在改写端口，日志会提示配置 same-port mapping。多个 room 同时使用时，每个 service 必须配置不同的 `ice_port`。
+
 可以把 coturn 部署在公网主机上。典型配置至少包含 `fingerprint`、`lt-cred-mech`、`realm`、`user`、`external-ip`，并用 `min-port` / `max-port` 限定 relay 端口范围。防火墙和云安全组需要放行 TURN 监听端口（通常为 UDP/TCP 3478）以及配置的 UDP relay 端口范围。例如将范围设为 `49160-49200`，就必须同时放行该段 UDP 端口。然后把相同用户名和密码填入上面的 TURN 条目。
 
 浏览器会尝试配置的所有 ICE URL；当前 aiortc 每个 PeerConnection 采用第一个可用的 STUN 和第一个可用的 TURN URL，因此要把 agent 所在网络最容易访问的 TURN 地址放在首位。若 UDP 3478 被阻断，可改用 `turn:...?...transport=tcp`，或为 coturn 配置证书后使用 `turns:...:5349?transport=tcp`。
@@ -211,6 +222,7 @@ room = "home"
 host = "127.0.0.1"
 scheme = "http"
 local_port = 10080
+ice_port = 40000
 password_hash = "$scrypt$v=1$n=32768,r=8,p=1$...$..."
 
 [[services]]
@@ -218,6 +230,7 @@ room = "office"
 host = "127.0.0.1"
 scheme = "http"
 local_port = 10081
+ice_port = 40001
 password_hash = ""
 
 [auth]

@@ -15,6 +15,7 @@ from .protocol import (
     http_response,
     load_config,
     resolve_config_path,
+    validate_ice_port,
     webrtc_ice_servers,
 )
 from .room_auth import parse_password_hash, validate_room_name
@@ -36,12 +37,13 @@ def configured_services(cfg):
     if not isinstance(webrtc, dict):
         raise TypeError("webrtc must be a table")
     ice_servers = webrtc_ice_servers(webrtc)
-    service_webrtc = (
+    base_service_webrtc = (
         {"ice_servers": ice_servers}
         if "ice_servers" in webrtc
         else {"stun_urls": list(webrtc.get("stun_urls", []))}
     )
     seen_rooms = set()
+    seen_ice_ports = set()
     result = []
     for index, service in enumerate(services, 1):
         room = str(service.get("room", "")).strip()
@@ -58,6 +60,14 @@ def configured_services(cfg):
         if not 1 <= port <= 65535:
             raise ValueError(f"invalid local_port for room {room}: {port}")
         seen_rooms.add(room)
+        ice_port = service.get("ice_port")
+        if ice_port is not None:
+            ice_port = validate_ice_port(
+                ice_port, f"services entry {index} ice_port"
+            )
+            if ice_port in seen_ice_ports:
+                raise ValueError(f"duplicate ice_port in client config: {ice_port}")
+            seen_ice_ports.add(ice_port)
         scheme = service.get("scheme", local.get("scheme", "http"))
         host = service.get("host", local.get("host", "127.0.0.1"))
         if not isinstance(scheme, str) or scheme.lower() not in {
@@ -88,6 +98,9 @@ def configured_services(cfg):
             raise ValueError(f"password_hash for room {room} must be a string")
         signal = dict(cfg["signal"])
         signal["room"] = room
+        service_webrtc = dict(base_service_webrtc)
+        if ice_port is not None:
+            service_webrtc["ice_port"] = ice_port
         service_cfg = {
             "signal": signal,
             "auth": cfg["auth"],
