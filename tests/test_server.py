@@ -23,7 +23,12 @@ def test_empty_tls_paths_select_http_and_partial_paths_fail():
 
 
 async def authenticate_agent(
-    client, private_key, room, password_hash="", expected_stun_urls=None
+    client,
+    private_key,
+    room,
+    password_hash="",
+    expected_stun_urls=None,
+    expected_ice_servers=None,
 ):
     agent = await client.ws_connect(f"/signal?role=agent&room={room}")
     challenge_message = await agent.receive_json()
@@ -41,6 +46,8 @@ async def authenticate_agent(
     assert response["type"] == "auth_ok"
     if expected_stun_urls is not None:
         assert response["stun_urls"] == expected_stun_urls
+    if expected_ice_servers is not None:
+        assert response["ice_servers"] == expected_ice_servers
     return agent
 
 
@@ -79,6 +86,42 @@ def test_server_stun_urls_are_sent_to_agent_and_browser():
             assert response.status == 200
             assert '"stunUrls":["stun:stun.miwifi.com:3478",' in text
             assert '"stun:stun.cloudflare.com:3478"]' in text
+            assert '"iceServers":[{"urls":["stun:stun.miwifi.com:3478",' in text
+            await agent.close()
+        rooms.clear()
+
+    asyncio.run(scenario())
+
+
+def test_server_turn_configuration_is_sent_to_agent_and_browser():
+    async def scenario():
+        rooms.clear()
+        private_key = Ed25519PrivateKey.generate()
+        ice_servers = [
+            {"urls": ["stun:stun.example.com:3478"]},
+            {
+                "urls": ["turn:turn.example.com:3478?transport=udp"],
+                "username": "bifrost",
+                "credential": "secret",
+            },
+        ]
+        app = create_app({
+            "auth": {"public_keys": [public_key_text(private_key.public_key())]},
+            "webrtc": {"ice_servers": ice_servers},
+        })
+        async with TestClient(TestServer(app)) as client:
+            agent = await authenticate_agent(
+                client,
+                private_key,
+                "home",
+                expected_stun_urls=["stun:stun.example.com:3478"],
+                expected_ice_servers=ice_servers,
+            )
+            response = await client.get("/home")
+            text = await response.text()
+            assert response.status == 200
+            assert '"turn:turn.example.com:3478?transport=udp"' in text
+            assert '"username":"bifrost","credential":"secret"' in text
             await agent.close()
         rooms.clear()
 

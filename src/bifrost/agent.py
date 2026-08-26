@@ -16,7 +16,7 @@ from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
 )
-from aiortc.sdp import candidate_from_sdp
+from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 
 from .auth import (
     auth_payload,
@@ -26,7 +26,7 @@ from .auth import (
     public_key_bytes,
     public_key_text,
 )
-from .protocol import http_response, validate_stun_urls
+from .protocol import http_response, validate_ice_servers, webrtc_ice_servers
 
 log = logging.getLogger("bifrost.agent")
 MessageHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
@@ -64,13 +64,18 @@ async def authenticate(
     if result.get("type") != "auth_ok":
         raise PermissionError(result.get("error", "agent public key was rejected"))
     try:
-        stun_urls = validate_stun_urls(
-            result.get("stun_urls", []), field="server stun_urls"
-        )
+        if "ice_servers" in result:
+            ice_servers = validate_ice_servers(
+                result["ice_servers"], field="server ice_servers"
+            )
+        else:
+            ice_servers = webrtc_ice_servers(
+                {"stun_urls": result.get("stun_urls", [])}, field="server webrtc"
+            )
     except (TypeError, ValueError) as exc:
-        raise PermissionError("server returned invalid STUN configuration") from exc
+        raise PermissionError("server returned invalid ICE configuration") from exc
     log.info("authenticated agent key=%s room=%s", fingerprint(public_key), room)
-    return stun_urls
+    return ice_servers
 
 
 def load_identity(auth):
@@ -79,17 +84,6 @@ def load_identity(auth):
     if public_key_bytes(private_key.public_key()) != public_key_bytes(public_key):
         raise ValueError("client public_key does not match private_key")
     return private_key, public_key
-
-
-def rtc_configuration(stun_urls):
-    """Build an explicit configuration so an empty list disables aiortc defaults."""
-    ice_servers = [RTCIceServer(urls=list(stun_urls))] if stun_urls else []
-    return RTCConfiguration(iceServers=ice_servers)
-
-
-def select_stun_urls(configured_stun_urls, server_stun_urls):
-    """Prefer the client configuration and fall back to the server list."""
-    return list(configured_stun_urls or server_stun_urls)
 
 
 async def _dispatch(channel, raw, handler: MessageHandler):
@@ -120,7 +114,7 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
             heartbeat=20,
             max_msg_size=8 * 1024 * 1024,
         ) as sig:
-            server_stun_urls = await authenticate(
+            server_ice_servers = await authenticate(
                 sig,
                 signal["room"],
                 private_key,
@@ -128,15 +122,18 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                 auth.get("timeout", 10),
                 password_hash,
             )
-            configured_stun_urls = validate_stun_urls(
-                cfg.get("webrtc", {}).get("stun_urls", [])
+            configured_ice_servers = webrtc_ice_servers(cfg.get("webrtc", {}))
+            ice_servers = configured_ice_servers or server_ice_servers
+            configuration = RTCConfiguration(
+                iceServers=[RTCIceServer(**server) for server in ice_servers]
             )
-            stun_urls = select_stun_urls(configured_stun_urls, server_stun_urls)
-            configuration = rtc_configuration(stun_urls)
+            urls = [url for server in ice_servers for url in server["urls"]]
+            has_turn = any(url.startswith(("turn:", "turns:")) for url in urls)
             log.info(
-                "using %s STUN configuration urls=%s",
-                "client" if configured_stun_urls else "server",
-                stun_urls,
+                "using %s ICE configuration urls=%s turn=%s",
+                "client" if configured_ice_servers else "server",
+                urls,
+                has_turn,
             )
             pc = None
             pending = []
@@ -149,7 +146,7 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                 nonlocal pc
                 if pc:
                     await pc.close()
-                pc = RTCPeerConnection(configuration=configuration)
+                pc = RTCPeerConnection(configuration)
 
                 @pc.on("icecandidate")
                 async def ice(candidate):
@@ -157,7 +154,7 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                         await send({
                             "type": "candidate",
                             "candidate": {
-                                "candidate": candidate.to_sdp(),
+                                "candidate": "candidate:" + candidate_to_sdp(candidate),
                                 "sdpMid": candidate.sdpMid,
                                 "sdpMLineIndex": candidate.sdpMLineIndex,
                             },
@@ -170,6 +167,20 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                         pc.connectionState,
                         pc.iceConnectionState,
                     )
+
+                @pc.on("iceconnectionstatechange")
+                async def ice_state():
+                    log.info(
+                        "peer ice=%s state=%s",
+                        pc.iceConnectionState,
+                        pc.connectionState,
+                    )
+                    if pc.iceConnectionState == "failed":
+                        log.warning(
+                            "ICE connectivity failed room=%s turn_configured=%s",
+                            signal["room"],
+                            has_turn,
+                        )
 
                 @pc.on("datachannel")
                 def channel(ch):
@@ -205,7 +216,9 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                     })
                 elif message.get("type") == "candidate" and message.get("candidate"):
                     value = message["candidate"]
-                    candidate = candidate_from_sdp(value["candidate"])
+                    candidate = candidate_from_sdp(
+                        value["candidate"].removeprefix("candidate:")
+                    )
                     candidate.sdpMid = value.get("sdpMid")
                     candidate.sdpMLineIndex = value.get("sdpMLineIndex")
                     if pc and pc.remoteDescription:

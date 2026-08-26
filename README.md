@@ -1,6 +1,6 @@
 # Bifrost
 
-Bifrost 是一个只使用公网服务器做 WebRTC 信令的内网 HTTP 访问器：业务 HTTP 数据走浏览器与本地 client 之间的 WebRTC DataChannel，公网 server 不做业务中继。
+Bifrost 是一个通过 WebRTC DataChannel 访问内网 HTTP 服务的访问器。连接优先在浏览器与本地 client 之间直连；公网 Bifrost server 只做信令，不转发业务数据。遇到无法打洞的 NAT 时，可以另接 TURN 服务中继 DataChannel 流量。
 
 ## 组件
 
@@ -31,21 +31,40 @@ server 默认按 `[tls]` 配置使用 HTTPS/WSS。如果 `tls.cert` 和 `tls.key
 
 内网 client 会使用 `config/client.toml` 中的 `[[services]]` 注册一个或多个 room。client 启动后，可以在 `https://<server>:8443/` 输入 room 名称，也可以直接打开 `https://<server>:8443/<room>`；未注册的 room 会被 server 拒绝。`/<room>/some/path?x=1` 这样的深链接会在登录成功后回到原地址。
 
-## STUN 配置
+## ICE、STUN 与 TURN 配置
 
-server 和 client 都通过 `[webrtc].stun_urls` 配置 UDP STUN 地址。server 列表会注入浏览器页面，同时在 agent 认证成功后通过信令下发；浏览器不再在 HTML 中写死 STUN 地址。client 的非空列表优先于 server 下发列表，配置为空数组或省略 `[webrtc]` 时才使用 server 列表：
+server 的 `[webrtc].ice_servers` 会注入浏览器页面，同时在 agent 认证成功后通过信令下发。client 的非空 `ice_servers` 优先于 server 下发列表；设为空数组或省略 `[webrtc]` 时使用 server 列表：
 
 ```toml
 [webrtc]
-stun_urls = [
+[[webrtc.ice_servers]]
+urls = [
   "stun:stun.miwifi.com:3478",
   "stun:stun.chat.bilibili.com:3478",
   "stun:stun.cloudflare.com:3478",
   "stun:stun.l.google.com:19302",
 ]
+
+[[webrtc.ice_servers]]
+urls = ["turn:turn.example.com:3478?transport=udp"]
+username = "bifrost"
+credential = "replace-with-a-strong-secret"
 ```
 
-示例按国内端点优先、国外端点补充排列。公共 STUN 没有可用性承诺，生产环境建议替换为自建或有 SLA 的服务。浏览器会使用 server 提供的整个列表；当前 aiortc 每个 PeerConnection 只采用列表中的第一个 STUN，因此 client 侧要把首选端点放在第一项。server 显式配置 `stun_urls = []` 会让浏览器及采用 server 回退的 client 不使用 STUN，只保留 host candidate。
+旧的 `stun_urls = [...]` 配置仍然兼容，但只能配置 STUN。公共 STUN 只能发现公网映射，不能让对称 NAT、运营商 CGNAT 或严格防火墙必然打洞成功。日志中若候选检查持续失败，且没有 `relay` candidate，就需要 TURN；继续增加公共 STUN 地址通常不能解决。
+
+可以把 coturn 部署在公网主机上。典型配置至少包含 `fingerprint`、`lt-cred-mech`、`realm`、`user`、`external-ip`，并用 `min-port` / `max-port` 限定 relay 端口范围。防火墙和云安全组需要放行 TURN 监听端口（通常为 UDP/TCP 3478）以及配置的 UDP relay 端口范围。例如将范围设为 `49160-49200`，就必须同时放行该段 UDP 端口。然后把相同用户名和密码填入上面的 TURN 条目。
+
+浏览器会尝试配置的所有 ICE URL；当前 aiortc 每个 PeerConnection 采用第一个可用的 STUN 和第一个可用的 TURN URL，因此要把 agent 所在网络最容易访问的 TURN 地址放在首位。若 UDP 3478 被阻断，可改用 `turn:...?...transport=tcp`，或为 coturn 配置证书后使用 `turns:...:5349?transport=tcp`。
+
+TURN 凭据必须下发给浏览器。免密 room 的静态凭据因此会暴露给所有访问者，可能被滥用；生产环境应保护 room、限制 coturn 配额，并定期轮换凭据。当前 Bifrost 支持静态 TURN 用户名/密码，尚未生成 TURN REST API 临时凭据。
+
+只需要在 server 集中配置时，client 使用：
+
+```toml
+[webrtc]
+ice_servers = []
+```
 
 首次 demo 使用自签名证书，浏览器需手动信任证书。页面内的导航栏会拦截内网页面的站内超链接，通过同一条 DataChannel 请求新 URI；浏览器真实地址保持在 Bifrost 页面，连接 ID/建立时间用于确认是否重连。
 
@@ -185,7 +204,7 @@ verify_tls = true
 
 [webrtc]
 # 空数组表示采用 server 通过认证响应下发的列表。
-stun_urls = []
+ice_servers = []
 
 [[services]]
 room = "home"

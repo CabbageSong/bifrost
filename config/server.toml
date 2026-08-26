@@ -4,14 +4,20 @@ port = 8443
 room = "home"
 
 [webrtc]
-# Used by browsers and sent to clients whose local stun_urls is empty.
-# Public STUN services have no availability guarantee; self-host for production.
-stun_urls = [
+# Used by browsers and sent to clients whose local ICE list is empty.
+[[webrtc.ice_servers]]
+urls = [
   "stun:stun.miwifi.com:3478",
   "stun:stun.chat.bilibili.com:3478",
   "stun:stun.cloudflare.com:3478",
   "stun:stun.l.google.com:19302",
 ]
+
+# Direct ICE can fail behind symmetric NAT. Add an authenticated TURN server:
+# [[webrtc.ice_servers]]
+# urls = ["turn:turn.example.com:3478?transport=udp"]
+# username = "bifrost"
+# credential = "replace-me"
 
 [tls]
 # Set both to "" to run plain HTTP (use only on a trusted network).

@@ -7,7 +7,9 @@ from bifrost.protocol import (
     http_request,
     http_response,
     resolve_config_path,
+    validate_ice_servers,
     validate_stun_urls,
+    webrtc_ice_servers,
 )
 
 
@@ -49,6 +51,57 @@ def test_validate_stun_urls_accepts_udp_stun_hosts_and_empty_list():
 def test_validate_stun_urls_rejects_invalid_values(value):
     with pytest.raises((TypeError, ValueError), match="stun"):
         validate_stun_urls(value)
+
+
+def test_validate_ice_servers_accepts_stun_and_authenticated_turn():
+    servers = [
+        {"urls": "stun:stun.example.com:3478"},
+        {
+            "urls": [
+                "turn:turn.example.com:3478?transport=udp",
+                "turns:turn.example.com:5349?transport=tcp",
+            ],
+            "username": "bifrost",
+            "credential": "secret",
+        },
+    ]
+
+    assert validate_ice_servers(servers) == [
+        {"urls": ["stun:stun.example.com:3478"]},
+        {
+            "urls": [
+                "turn:turn.example.com:3478?transport=udp",
+                "turns:turn.example.com:5349?transport=tcp",
+            ],
+            "username": "bifrost",
+            "credential": "secret",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "servers",
+    [
+        [{"urls": ["https://turn.example.com"]}],
+        [{"urls": ["turn:turn.example.com:3478"]}],
+        [{"urls": ["turns:turn.example.com:5349?transport=udp"], "username": "u", "credential": "p"}],
+        [{"urls": ["stun:stun.example.com"], "username": "u", "credential": "p"}],
+        [{"urls": ["stun:stun.example.com"], "password": "typo"}],
+    ],
+)
+def test_validate_ice_servers_rejects_unusable_entries(servers):
+    with pytest.raises(
+        (TypeError, ValueError), match="stun|ICE|TURN|credential|unsupported"
+    ):
+        validate_ice_servers(servers)
+
+
+def test_webrtc_ice_servers_keeps_legacy_stun_compatibility():
+    urls = ["stun:stun.example.com:3478"]
+
+    assert webrtc_ice_servers({"stun_urls": urls}) == [{"urls": urls}]
+    with pytest.raises(ValueError, match="both ice_servers and stun_urls"):
+        webrtc_ice_servers({"stun_urls": [], "ice_servers": []})
 
 
 def test_http_request_defaults():

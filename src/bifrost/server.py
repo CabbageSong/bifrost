@@ -24,9 +24,10 @@ from .auth import (
 )
 from .protocol import (
     DEFAULT_STUN_URLS,
+    legacy_stun_urls,
     load_config,
     resolve_config_path,
-    validate_stun_urls,
+    webrtc_ice_servers,
 )
 from .room_auth import (
     create_login_token,
@@ -49,6 +50,7 @@ SESSION_TTL = web.AppKey("room_session_ttl", int)
 LOGIN_LIMITER = web.AppKey("room_login_limiter", object)
 PASSWORD_WORKERS = web.AppKey("room_password_workers", asyncio.Semaphore)
 STUN_URLS = web.AppKey("stun_urls", list)
+ICE_SERVERS = web.AppKey("ice_servers", list)
 
 STATIC = files("bifrost").joinpath("static")
 SHELL = STATIC.joinpath("index.html").read_text(encoding="utf-8")
@@ -232,6 +234,7 @@ async def page(request):
             "path": private_path,
             "protected": protected,
             "stunUrls": request.app[STUN_URLS],
+            "iceServers": request.app[ICE_SERVERS],
         }
     )
     shell = SHELL.replace("/* BIFROST_CONFIG */", config, 1)
@@ -377,10 +380,19 @@ async def authenticate_agent(request, ws, room):
             await ws.send_json({"type": "auth_error", "error": "authentication failed"})
             await ws.close(code=1008, message=b"authentication failed")
         return None
-    await ws.send_json({
+    auth_ok = {
         "type": "auth_ok",
         "stun_urls": request.app[STUN_URLS],
-    })
+    }
+    # Keep the old response byte-for-byte compatible for STUN-only deployments;
+    # TURN credentials require the richer field for upgraded clients.
+    if any(
+        not url.startswith("stun:")
+        for server in request.app[ICE_SERVERS]
+        for url in server["urls"]
+    ):
+        auth_ok["ice_servers"] = request.app[ICE_SERVERS]
+    await ws.send_json(auth_ok)
     return entry, password_hash
 
 
@@ -545,9 +557,10 @@ def create_app(cfg):
     webrtc = cfg.get("webrtc", {})
     if not isinstance(webrtc, dict):
         raise TypeError("webrtc must be a table")
-    stun_urls = validate_stun_urls(
-        webrtc.get("stun_urls", list(DEFAULT_STUN_URLS))
-    )
+    if "ice_servers" not in webrtc and "stun_urls" not in webrtc:
+        webrtc = {**webrtc, "stun_urls": list(DEFAULT_STUN_URLS)}
+    ice_servers = webrtc_ice_servers(webrtc)
+    stun_urls = legacy_stun_urls(ice_servers)
     default_room = cfg.get("server", {}).get("room", "home")
     validate_room_name(default_room)
     app = web.Application(client_max_size=64 * 1024)
@@ -568,6 +581,7 @@ def create_app(cfg):
     workers = _positive_int(browser_auth, "password_workers", 2, maximum=16)
     app[LOGIN_LIMITER] = LoginLimiter(attempts, window)
     app[PASSWORD_WORKERS] = asyncio.Semaphore(workers)
+    app[ICE_SERVERS] = ice_servers
     app.router.add_get("/signal", signal)
     app.router.add_get("/server-healthz", health)
     app.router.add_post("/_bifrost/login", login)

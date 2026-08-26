@@ -228,6 +228,19 @@ def test_empty_client_stun_urls_are_preserved_for_server_fallback():
     assert services[0][2]['webrtc']['stun_urls'] == []
 
 
+def test_client_accepts_turn_ice_servers():
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    cfg['webrtc'] = {'ice_servers': [{
+        'urls': ['turn:turn.example.com:3478?transport=udp'],
+        'username': 'bifrost',
+        'credential': 'secret',
+    }]}
+
+    services = configured_services(cfg)
+
+    assert services[0][2]['webrtc'] == cfg['webrtc']
+
+
 @pytest.mark.parametrize(
     'stun_urls',
     ['stun:example.com:3478', ['turn:example.com:3478'], [42]],
