@@ -10,12 +10,34 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from bifrost.auth import auth_payload, public_key_text
 from bifrost.room_auth import hash_password
-from bifrost.server import LoginLimiter, create_app, create_ssl_context, rooms
+from bifrost.server import (
+    LoginLimiter,
+    create_app,
+    create_ssl_context,
+    rooms,
+    validate_server_config,
+)
+
+
+def server_config(public_keys):
+    return {
+        "server": {"bind": "127.0.0.1", "port": 8443},
+        "webrtc": {"ice_servers": []},
+        "tls": {"cert": "", "key": ""},
+        "auth": {"public_keys": public_keys, "timeout": 1},
+        "browser_auth": {
+            "session_ttl": 43200,
+            "max_attempts": 5,
+            "attempt_window": 60,
+            "password_workers": 2,
+        },
+    }
 
 
 def test_empty_tls_paths_select_http_and_partial_paths_fail():
     assert create_ssl_context({"cert": "", "key": ""}) is None
-    assert create_ssl_context({}) is None
+    with pytest.raises(ValueError, match="missing required field: cert"):
+        create_ssl_context({})
     with pytest.raises(ValueError, match="both be empty or both be set"):
         create_ssl_context({"cert": "/tmp/cert.pem", "key": ""})
     with pytest.raises(TypeError, match="must be strings"):
@@ -27,8 +49,6 @@ async def authenticate_agent(
     private_key,
     room,
     password_hash="",
-    expected_stun_urls=None,
-    expected_ice_servers=None,
 ):
     agent = await client.ws_connect(f"/signal?role=agent&room={room}")
     challenge_message = await agent.receive_json()
@@ -43,11 +63,7 @@ async def authenticate_agent(
         }
     )
     response = await agent.receive_json()
-    assert response["type"] == "auth_ok"
-    if expected_stun_urls is not None:
-        assert response["stun_urls"] == expected_stun_urls
-    if expected_ice_servers is not None:
-        assert response["ice_servers"] == expected_ice_servers
+    assert response == {"type": "auth_ok"}
     return agent
 
 
@@ -62,61 +78,51 @@ def test_login_limiter_expires_failed_attempts():
     assert limiter.retry_after(key, now=161) == 0
 
 
-def test_server_stun_urls_are_sent_to_agent_and_browser():
+def test_server_stun_servers_are_sent_to_browser():
     async def scenario():
         rooms.clear()
         private_key = Ed25519PrivateKey.generate()
-        stun_urls = [
+        urls = [
             "stun:stun.miwifi.com:3478",
             "stun:stun.cloudflare.com:3478",
         ]
-        app = create_app({
-            "auth": {"public_keys": [public_key_text(private_key.public_key())]},
-            "webrtc": {"stun_urls": stun_urls},
-        })
+        cfg = server_config([public_key_text(private_key.public_key())])
+        cfg["webrtc"]["ice_servers"] = [{
+            "urls": urls,
+        }]
+        app = create_app(cfg)
         async with TestClient(TestServer(app)) as client:
-            agent = await authenticate_agent(
-                client,
-                private_key,
-                "home",
-                expected_stun_urls=stun_urls,
-            )
+            agent = await authenticate_agent(client, private_key, "home")
             response = await client.get("/home")
             text = await response.text()
             assert response.status == 200
-            assert '"stunUrls":["stun:stun.miwifi.com:3478",' in text
-            assert '"stun:stun.cloudflare.com:3478"]' in text
             assert '"iceServers":[{"urls":["stun:stun.miwifi.com:3478",' in text
+            assert '"username"' not in text
             await agent.close()
         rooms.clear()
 
     asyncio.run(scenario())
 
 
-def test_server_turn_configuration_is_sent_to_agent_and_browser():
+def test_server_turn_configuration_is_sent_to_browser():
     async def scenario():
         rooms.clear()
         private_key = Ed25519PrivateKey.generate()
         ice_servers = [
-            {"urls": ["stun:stun.example.com:3478"]},
+            {
+                "urls": ["stun:stun.example.com:3478"],
+            },
             {
                 "urls": ["turn:turn.example.com:3478?transport=udp"],
                 "username": "bifrost",
                 "credential": "secret",
             },
         ]
-        app = create_app({
-            "auth": {"public_keys": [public_key_text(private_key.public_key())]},
-            "webrtc": {"ice_servers": ice_servers},
-        })
+        cfg = server_config([public_key_text(private_key.public_key())])
+        cfg["webrtc"]["ice_servers"] = ice_servers
+        app = create_app(cfg)
         async with TestClient(TestServer(app)) as client:
-            agent = await authenticate_agent(
-                client,
-                private_key,
-                "home",
-                expected_stun_urls=["stun:stun.example.com:3478"],
-                expected_ice_servers=ice_servers,
-            )
+            agent = await authenticate_agent(client, private_key, "home")
             response = await client.get("/home")
             text = await response.text()
             assert response.status == 200
@@ -129,26 +135,63 @@ def test_server_turn_configuration_is_sent_to_agent_and_browser():
 
 
 @pytest.mark.parametrize(
-    "stun_urls",
-    ["stun:example.com:3478", ["https://example.com"], ["stun:example.com:70000"]],
+    "urls",
+    ["https://example.com", ["https://example.com"], ["stun:example.com:70000"]],
 )
-def test_server_rejects_invalid_stun_configuration(stun_urls):
-    with pytest.raises((TypeError, ValueError), match="stun"):
-        create_app({"auth": {"public_keys": []}, "webrtc": {"stun_urls": stun_urls}})
+def test_server_rejects_invalid_ice_urls(urls):
+    cfg = server_config(["not-reached"])
+    cfg["webrtc"]["ice_servers"] = [{
+        "urls": urls,
+    }]
+    with pytest.raises((TypeError, ValueError), match="ICE|stun"):
+        create_app(cfg)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("server",),
+        ("webrtc",),
+        ("tls",),
+        ("auth",),
+        ("browser_auth",),
+        ("server", "bind"),
+        ("server", "port"),
+        ("webrtc", "ice_servers"),
+        ("tls", "cert"),
+        ("tls", "key"),
+        ("auth", "public_keys"),
+        ("auth", "timeout"),
+        ("browser_auth", "session_ttl"),
+        ("browser_auth", "max_attempts"),
+        ("browser_auth", "attempt_window"),
+        ("browser_auth", "password_workers"),
+    ],
+)
+def test_server_rejects_every_missing_required_field(path):
+    cfg = server_config(["not-loaded"])
+    target = cfg
+    for key in path[:-1]:
+        target = target[key]
+    del target[path[-1]]
+
+    with pytest.raises(ValueError, match=f"missing required field: {path[-1]}"):
+        validate_server_config(cfg)
+
+
+def test_server_rejects_unknown_config_fields():
+    cfg = server_config(["not-loaded"])
+    cfg["server"]["workers"] = 4
+
+    with pytest.raises(ValueError, match="unsupported field: workers"):
+        validate_server_config(cfg)
 
 
 def test_agent_registers_room_before_browser_can_join():
     async def scenario():
         rooms.clear()
         private_key = Ed25519PrivateKey.generate()
-        app = create_app(
-            {
-                "auth": {
-                    "public_keys": [public_key_text(private_key.public_key())],
-                    "timeout": 1,
-                }
-            }
-        )
+        app = create_app(server_config([public_key_text(private_key.public_key())]))
         client = TestClient(TestServer(app))
         await client.start_server()
 
@@ -186,15 +229,9 @@ def test_room_portal_and_protected_room_login():
         rooms.clear()
         private_key = Ed25519PrivateKey.generate()
         password_hash = hash_password("open sesame", salt=b"t" * 16)
-        app = create_app(
-            {
-                "auth": {
-                    "public_keys": [public_key_text(private_key.public_key())],
-                    "timeout": 1,
-                },
-                "browser_auth": {"session_ttl": 300},
-            }
-        )
+        cfg = server_config([public_key_text(private_key.public_key())])
+        cfg["browser_auth"]["session_ttl"] = 300
+        app = create_app(cfg)
         async with TestClient(TestServer(app)) as client:
             portal = await client.get("/")
             assert portal.status == 200
@@ -289,9 +326,7 @@ def test_empty_room_password_does_not_require_login():
     async def scenario():
         rooms.clear()
         private_key = Ed25519PrivateKey.generate()
-        app = create_app(
-            {"auth": {"public_keys": [public_key_text(private_key.public_key())]}}
-        )
+        app = create_app(server_config([public_key_text(private_key.public_key())]))
         async with TestClient(TestServer(app)) as client:
             agent = await authenticate_agent(client, private_key, "home")
             response = await client.get("/home")

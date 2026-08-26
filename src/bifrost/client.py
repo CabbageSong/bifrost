@@ -2,8 +2,8 @@
 
 import argparse
 import asyncio
-import json
 import logging
+import math
 
 import aiohttp
 from yarl import URL
@@ -15,8 +15,9 @@ from .protocol import (
     http_response,
     load_config,
     resolve_config_path,
+    validate_config_table,
     validate_ice_port,
-    webrtc_ice_servers,
+    validate_ice_servers,
 )
 from .room_auth import parse_password_hash, validate_room_name
 
@@ -25,51 +26,70 @@ log = logging.getLogger("bifrost.client")
 
 def configured_services(cfg):
     """Validate and normalize the room-to-local-port mappings."""
-    services = cfg.get("services")
+    validate_config_table(
+        cfg,
+        "client config",
+        {"signal", "webrtc", "services", "auth"},
+    )
+    signal_config = validate_config_table(
+        cfg["signal"], "signal", {"url", "verify_tls"}
+    )
+    if not isinstance(signal_config["url"], str) or not signal_config["url"]:
+        raise TypeError("signal.url must be a non-empty string")
+    if not isinstance(signal_config["verify_tls"], bool):
+        raise TypeError("signal.verify_tls must be a boolean")
+
+    auth = validate_config_table(
+        cfg["auth"],
+        "auth",
+        {"private_key", "timeout"},
+    )
+    if not isinstance(auth["private_key"], str) or not auth["private_key"]:
+        raise TypeError("auth.private_key must be a non-empty string")
+    if (
+        isinstance(auth["timeout"], bool)
+        or not isinstance(auth["timeout"], (int, float))
+        or not math.isfinite(auth["timeout"])
+        or auth["timeout"] <= 0
+    ):
+        raise ValueError("auth.timeout must be a positive number")
+
+    webrtc = validate_config_table(cfg["webrtc"], "webrtc", {"ice_servers"})
+    ice_servers = validate_ice_servers(webrtc["ice_servers"])
+    services = cfg["services"]
     if not isinstance(services, list) or not services:
         raise ValueError("client config requires at least one [[services]] entry")
-    local = cfg.get("local_http", {})
-    if local:
-        log.warning(
-            "[local_http] is deprecated; configure host and scheme in each service"
-        )
-    webrtc = cfg.get("webrtc", {})
-    if not isinstance(webrtc, dict):
-        raise TypeError("webrtc must be a table")
-    ice_servers = webrtc_ice_servers(webrtc)
-    base_service_webrtc = (
-        {"ice_servers": ice_servers}
-        if "ice_servers" in webrtc
-        else {"stun_urls": list(webrtc.get("stun_urls", []))}
-    )
+    base_service_webrtc = {"ice_servers": ice_servers}
     seen_rooms = set()
     seen_ice_ports = set()
     result = []
     for index, service in enumerate(services, 1):
-        room = str(service.get("room", "")).strip()
+        item_field = f"services entry {index}"
+        validate_config_table(
+            service,
+            item_field,
+            {"room", "local_port", "ice_port", "host", "scheme", "password_hash"},
+        )
+        room = service["room"]
         try:
             validate_room_name(room)
         except ValueError as exc:
             raise ValueError(f"invalid room in services entry {index}: {exc}") from exc
         if room in seen_rooms:
             raise ValueError(f"duplicate room in client config: {room}")
-        try:
-            port = int(service["local_port"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"services entry {index} requires local_port") from exc
-        if not 1 <= port <= 65535:
+        port = service["local_port"]
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError(f"invalid local_port for room {room}: {port}")
         seen_rooms.add(room)
-        ice_port = service.get("ice_port")
-        if ice_port is not None:
-            ice_port = validate_ice_port(
-                ice_port, f"services entry {index} ice_port"
-            )
-            if ice_port in seen_ice_ports:
-                raise ValueError(f"duplicate ice_port in client config: {ice_port}")
-            seen_ice_ports.add(ice_port)
-        scheme = service.get("scheme", local.get("scheme", "http"))
-        host = service.get("host", local.get("host", "127.0.0.1"))
+        ice_port = validate_ice_port(
+            service["ice_port"],
+            f"services entry {index} ice_port",
+        )
+        if ice_port in seen_ice_ports:
+            raise ValueError(f"duplicate ice_port in client config: {ice_port}")
+        seen_ice_ports.add(ice_port)
+        scheme = service["scheme"]
+        host = service["host"]
         if not isinstance(scheme, str) or scheme.lower() not in {
             "http",
             "https",
@@ -82,11 +102,7 @@ def configured_services(cfg):
             target = str(URL.build(scheme=scheme, host=host, port=port))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid host for room {room}") from exc
-        if "password" in service:
-            raise ValueError(
-                f"services entry {index} uses unsupported password; use password_hash"
-            )
-        password_hash = service.get("password_hash", "")
+        password_hash = service["password_hash"]
         if password_hash:
             try:
                 parse_password_hash(password_hash)
@@ -94,13 +110,12 @@ def configured_services(cfg):
                 raise ValueError(
                     f"invalid password_hash for room {room}: {exc}"
                 ) from exc
-        elif "password_hash" in service and not isinstance(password_hash, str):
+        elif not isinstance(password_hash, str):
             raise ValueError(f"password_hash for room {room} must be a string")
         signal = dict(cfg["signal"])
         signal["room"] = room
         service_webrtc = dict(base_service_webrtc)
-        if ice_port is not None:
-            service_webrtc["ice_port"] = ice_port
+        service_webrtc["ice_port"] = ice_port
         service_cfg = {
             "signal": signal,
             "auth": cfg["auth"],
@@ -124,10 +139,7 @@ async def proxy_http(message, target, session):
             for key, value in message.get("headers", {}).items()
             if key.lower() not in ("host", "content-length")
         }
-        if message.get("body_base64") is not None:
-            body = decode_body(message["body_base64"])
-        else:
-            body = (message.get("body") or "").encode("utf-8")
+        body = decode_body(message["body_base64"])
         method = (message.get("method") or "GET").upper()
         async with session.request(
             method,
@@ -140,26 +152,12 @@ async def proxy_http(message, target, session):
                 request_id,
                 response.status,
                 dict(response.headers),
-                raw_body.decode("utf-8", "replace"),
-                body_base64=encode_body(raw_body),
+                encode_body(raw_body),
                 status_text=response.reason or "",
                 response_url=response.url.raw_path_qs,
             )
     except Exception as exc:
-        return http_response(request_id, 502, error=str(exc))
-
-
-async def handle_http(channel, raw, target, session):
-    """Compatibility adapter for callers that provide raw channel messages."""
-    request_id = None
-    try:
-        message = json.loads(raw)
-        request_id = message.get("id")
-        result = await proxy_http(message, target, session)
-        if result is not None:
-            channel.send(json.dumps(result))
-    except Exception as exc:
-        channel.send(json.dumps(http_response(request_id, 502, error=str(exc))))
+        return http_response(request_id, 502, {}, "", error=str(exc))
 
 
 async def run(cfg):

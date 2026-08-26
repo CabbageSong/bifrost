@@ -3,13 +3,6 @@ import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
 
-DEFAULT_STUN_URLS = (
-    "stun:stun.miwifi.com:3478",
-    "stun:stun.chat.bilibili.com:3478",
-    "stun:stun.cloudflare.com:3478",
-    "stun:stun.l.google.com:19302",
-)
-
 
 def default_config_path(component, config_dir=None):
     """Return the required per-component config path under ~/.config/bifrost."""
@@ -43,42 +36,19 @@ def load_config(path):
         return tomllib.load(f)
 
 
-def validate_stun_urls(value, field="webrtc.stun_urls"):
-    """Validate a TOML/JSON list of UDP STUN URLs."""
-    if not isinstance(value, list):
-        raise TypeError(f"{field} must be an array of strings")
-    if len(value) > 16:
-        raise ValueError(f"{field} cannot contain more than 16 entries")
-
-    result = []
-    for index, url in enumerate(value):
-        if not isinstance(url, str):
-            raise TypeError(f"{field}[{index}] must be a string")
-        if any(char.isspace() for char in url):
-            raise ValueError(f"{field}[{index}] is not a valid STUN URL")
-        if not url.startswith("stun:"):
-            raise ValueError(f"{field}[{index}] must use the stun: scheme")
-
-        try:
-            parsed = urlsplit("stun://" + url.removeprefix("stun:"))
-            port = parsed.port
-            parsed.hostname.encode("ascii")
-        except (AttributeError, UnicodeError, ValueError) as exc:
-            raise ValueError(f"{field}[{index}] is not a valid STUN URL") from exc
-        if (
-            not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.path
-            or parsed.query
-            or parsed.fragment
-            or (port is not None and not 1 <= port <= 65535)
-        ):
-            raise ValueError(f"{field}[{index}] is not a valid STUN URL")
-        if url in result:
-            raise ValueError(f"{field} contains a duplicate URL: {url}")
-        result.append(url)
-    return result
+def validate_config_table(value, field, required, optional=()):
+    """Require an exact set of explicit keys in a configuration table."""
+    if not isinstance(value, dict):
+        raise TypeError(f"{field} must be a table")
+    required = set(required)
+    allowed = required | set(optional)
+    missing = sorted(required - set(value))
+    if missing:
+        raise ValueError(f"{field} is missing required field: {missing[0]}")
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"{field} contains unsupported field: {unknown[0]}")
+    return value
 
 
 def _validate_ice_url(url, field):
@@ -128,14 +98,11 @@ def validate_ice_servers(value, field="webrtc.ice_servers"):
     seen_urls = set()
     for index, server in enumerate(value):
         item_field = f"{field}[{index}]"
-        if not isinstance(server, dict):
-            raise TypeError(f"{item_field} must be a table")
-        unknown = set(server) - {"urls", "username", "credential"}
-        if unknown:
-            name = min(unknown)
-            raise ValueError(f"{item_field} contains unsupported field: {name}")
+        validate_config_table(
+            server, item_field, {"urls"}, {"username", "credential"}
+        )
 
-        raw_urls = server.get("urls")
+        raw_urls = server["urls"]
         urls = [raw_urls] if isinstance(raw_urls, str) else raw_urls
         if not isinstance(urls, list) or not urls:
             raise TypeError(f"{item_field}.urls must be a string or non-empty array")
@@ -152,43 +119,33 @@ def validate_ice_servers(value, field="webrtc.ice_servers"):
             normalized_urls.append(normalized)
             has_turn = has_turn or normalized.startswith(("turn:", "turns:"))
 
-        username = server.get("username")
-        credential = server.get("credential")
         if has_turn:
-            if not isinstance(username, str) or not username:
+            missing = {"username", "credential"} - set(server)
+            if missing:
+                raise ValueError(
+                    f"{item_field} is missing required TURN field: {min(missing)}"
+                )
+            username = server["username"]
+            credential = server["credential"]
+            if not isinstance(username, str) or not isinstance(credential, str):
+                raise TypeError(
+                    f"{item_field} username and credential must be strings"
+                )
+            if not username:
                 raise ValueError(f"{item_field}.username is required for TURN")
-            if not isinstance(credential, str) or not credential:
+            if not credential:
                 raise ValueError(f"{item_field}.credential is required for TURN")
-        elif username is not None or credential is not None:
-            raise ValueError(f"{item_field} credentials require a TURN URL")
+        elif "username" in server or "credential" in server:
+            raise ValueError(f"{item_field} credentials are only valid for TURN")
 
         normalized_server = {"urls": normalized_urls}
         if has_turn:
-            normalized_server.update({"username": username, "credential": credential})
+            normalized_server.update({
+                "username": username,
+                "credential": credential,
+            })
         result.append(normalized_server)
     return result
-
-
-def webrtc_ice_servers(config, field="webrtc"):
-    """Read new ICE server tables or convert the legacy STUN URL list."""
-    if not isinstance(config, dict):
-        raise TypeError(f"{field} must be a table")
-    if "ice_servers" in config and "stun_urls" in config:
-        raise ValueError(f"{field} cannot contain both ice_servers and stun_urls")
-    if "ice_servers" in config:
-        return validate_ice_servers(config["ice_servers"], f"{field}.ice_servers")
-    stun_urls = validate_stun_urls(config.get("stun_urls", []), f"{field}.stun_urls")
-    return [{"urls": stun_urls}] if stun_urls else []
-
-
-def legacy_stun_urls(ice_servers):
-    """Extract URLs an older STUN-only client can still consume."""
-    return [
-        url
-        for server in ice_servers
-        for url in server["urls"]
-        if url.startswith("stun:")
-    ]
 
 
 def validate_ice_port(value, field="ice_port"):
@@ -200,27 +157,12 @@ def validate_ice_port(value, field="ice_port"):
     return value
 
 
-def http_request(request_id, method, path, headers=None, body="", body_base64=None):
-    result = {
-        "type": "http_request",
-        "id": request_id,
-        "method": method,
-        "path": path or "/",
-        "headers": headers or {},
-        "body": body,
-    }
-    if body_base64 is not None:
-        result["body_base64"] = body_base64
-    return result
-
-
 def http_response(
     request_id,
     status,
-    headers=None,
-    body="",
+    headers,
+    body_base64,
     error=None,
-    body_base64=None,
     status_text="",
     response_url="",
 ):
@@ -228,11 +170,9 @@ def http_response(
         "type": "http_response",
         "id": request_id,
         "status": status,
-        "headers": headers or {},
-        "body": body,
+        "headers": headers,
+        "body_base64": body_base64,
     }
-    if body_base64 is not None:
-        result["body_base64"] = body_base64
     if status_text:
         result["status_text"] = status_text
     if response_url:
@@ -248,7 +188,5 @@ def encode_body(data):
 
 
 def decode_body(value):
-    """Decode a protocol body, accepting the legacy text field as a fallback."""
-    if value is None:
-        return b""
+    """Decode a protocol body from its base64 representation."""
     return base64.b64decode(value, validate=True)

@@ -24,15 +24,12 @@ from .auth import (
     auth_payload,
     fingerprint,
     load_private_key,
-    load_public_key,
-    public_key_bytes,
     public_key_text,
 )
 from .protocol import (
     http_response,
     validate_ice_port,
     validate_ice_servers,
-    webrtc_ice_servers,
 )
 
 log = logging.getLogger("bifrost.agent")
@@ -61,9 +58,6 @@ def _install_ice_port_binding(loop):
 @contextmanager
 def bind_ice_port(port):
     """Apply ``port`` only to UDP endpoints created in the current task."""
-    if port is None:
-        yield
-        return
     loop = asyncio.get_running_loop()
     _install_ice_port_binding(loop)
     token = _ice_port.set(port)
@@ -74,8 +68,6 @@ def bind_ice_port(port):
 
 
 def _check_ice_port(pc, port, room):
-    if port is None:
-        return
     candidates = pc.sctp.transport.transport.iceGatherer.getLocalCandidates()
     host_ports = {candidate.port for candidate in candidates if candidate.type == "host"}
     if host_ports != {port}:
@@ -102,9 +94,7 @@ def _check_ice_port(pc, port, room):
         )
 
 
-async def authenticate(
-    sig, room, private_key, public_key, timeout=10, password_hash=""
-):
+async def authenticate(sig, room, private_key, public_key, timeout, password_hash):
     msg = await sig.receive(timeout=timeout)
     if msg.type != aiohttp.WSMsgType.TEXT:
         raise PermissionError("server closed before authentication")
@@ -133,27 +123,12 @@ async def authenticate(
         raise PermissionError("invalid authentication result") from exc
     if result.get("type") != "auth_ok":
         raise PermissionError(result.get("error", "agent public key was rejected"))
-    try:
-        if "ice_servers" in result:
-            ice_servers = validate_ice_servers(
-                result["ice_servers"], field="server ice_servers"
-            )
-        else:
-            ice_servers = webrtc_ice_servers(
-                {"stun_urls": result.get("stun_urls", [])}, field="server webrtc"
-            )
-    except (TypeError, ValueError) as exc:
-        raise PermissionError("server returned invalid ICE configuration") from exc
     log.info("authenticated agent key=%s room=%s", fingerprint(public_key), room)
-    return ice_servers
 
 
 def load_identity(auth):
-    private_key = load_private_key(auth["private_key"], auth.get("private_key_password"))
-    public_key = load_public_key(auth["public_key"])
-    if public_key_bytes(private_key.public_key()) != public_key_bytes(public_key):
-        raise ValueError("client public_key does not match private_key")
-    return private_key, public_key
+    private_key = load_private_key(auth["private_key"])
+    return private_key, private_key.public_key()
 
 
 async def _dispatch(channel, raw, handler: MessageHandler):
@@ -167,38 +142,34 @@ async def _dispatch(channel, raw, handler: MessageHandler):
     except Exception as exc:
         log.exception("request forwarding failed")
         if channel.readyState == "open":
-            channel.send(json.dumps(http_response(request_id, 502, error=str(exc))))
+            channel.send(json.dumps(http_response(request_id, 502, {}, "", error=str(exc))))
 
 
 async def run_agent(cfg, handler: MessageHandler, identity=None):
     """Run one authenticated signaling/WebRTC session using ``handler``."""
     signal = cfg["signal"]
     auth = cfg["auth"]
-    password_hash = cfg.get("browser_auth", {}).get("password_hash", "")
+    password_hash = cfg["browser_auth"]["password_hash"]
     private_key, public_key = identity or load_identity(auth)
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(
             signal["url"],
             params={"role": "agent", "room": signal["room"]},
-            ssl=False if not signal.get("verify_tls", True) else None,
+            ssl=False if not signal["verify_tls"] else None,
             heartbeat=20,
             max_msg_size=8 * 1024 * 1024,
         ) as sig:
-            server_ice_servers = await authenticate(
+            await authenticate(
                 sig,
                 signal["room"],
                 private_key,
                 public_key,
-                auth.get("timeout", 10),
+                auth["timeout"],
                 password_hash,
             )
-            configured_ice_servers = webrtc_ice_servers(cfg.get("webrtc", {}))
-            ice_servers = configured_ice_servers or server_ice_servers
-            configured_ice_port = cfg.get("webrtc", {}).get("ice_port")
-            ice_port = (
-                validate_ice_port(configured_ice_port, "webrtc.ice_port")
-                if configured_ice_port is not None
-                else None
+            ice_servers = validate_ice_servers(cfg["webrtc"]["ice_servers"])
+            ice_port = validate_ice_port(
+                cfg["webrtc"]["ice_port"], "webrtc.ice_port"
             )
             configuration = RTCConfiguration(
                 iceServers=[RTCIceServer(**server) for server in ice_servers]
@@ -207,10 +178,10 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
             has_turn = any(url.startswith(("turn:", "turns:")) for url in urls)
             log.info(
                 "using %s ICE configuration urls=%s turn=%s local_port=%s",
-                "client" if configured_ice_servers else "server",
+                "configured" if ice_servers else "direct",
                 urls,
                 has_turn,
-                ice_port or "random",
+                ice_port,
             )
             pc = None
             pending = []

@@ -19,15 +19,13 @@ from .auth import (
     load_authorized_keys,
     parse_public_key,
     public_key_bytes,
-    verify_legacy_signature,
     verify_signature,
 )
 from .protocol import (
-    DEFAULT_STUN_URLS,
-    legacy_stun_urls,
     load_config,
     resolve_config_path,
-    webrtc_ice_servers,
+    validate_config_table,
+    validate_ice_servers,
 )
 from .room_auth import (
     create_login_token,
@@ -44,12 +42,10 @@ log = logging.getLogger("bifrost.server")
 rooms = {}
 AUTHORIZED_KEYS = web.AppKey("authorized_keys", dict)
 AUTH_TIMEOUT = web.AppKey("auth_timeout", float)
-DEFAULT_ROOM = web.AppKey("default_room", str)
 SESSION_SECRET = web.AppKey("room_session_secret", bytes)
 SESSION_TTL = web.AppKey("room_session_ttl", int)
 LOGIN_LIMITER = web.AppKey("room_login_limiter", object)
 PASSWORD_WORKERS = web.AppKey("room_password_workers", asyncio.Semaphore)
-STUN_URLS = web.AppKey("stun_urls", list)
 ICE_SERVERS = web.AppKey("ice_servers", list)
 
 STATIC = files("bifrost").joinpath("static")
@@ -128,9 +124,8 @@ def _html_response(text, *, status=200, headers=None):
     )
 
 
-def _portal_page(default_room, error="", status=200):
-    page = PORTAL.replace("{{DEFAULT_ROOM}}", html.escape(default_room, quote=True))
-    page = page.replace("{{ERROR}}", html.escape(error))
+def _portal_page(error="", status=200):
+    page = PORTAL.replace("{{ERROR}}", html.escape(error))
     return _html_response(page, status=status)
 
 
@@ -199,9 +194,9 @@ async def portal(request):
         try:
             validate_room_name(requested_room)
         except ValueError as exc:
-            return _portal_page(request.app[DEFAULT_ROOM], str(exc), status=400)
+            return _portal_page(str(exc), status=400)
         raise web.HTTPFound(f"/{requested_room}")
-    return _portal_page(request.app[DEFAULT_ROOM])
+    return _portal_page()
 
 
 async def page(request):
@@ -233,7 +228,6 @@ async def page(request):
             "room": room,
             "path": private_path,
             "protected": protected,
-            "stunUrls": request.app[STUN_URLS],
             "iceServers": request.app[ICE_SERVERS],
         }
     )
@@ -343,8 +337,7 @@ async def authenticate_agent(request, ws, room):
         response = json.loads(msg.data)
         if response.get("type") != "auth_response":
             raise PermissionError("unexpected authentication response")
-        has_password_policy = "password_hash" in response
-        password_hash = response.get("password_hash", "")
+        password_hash = response["password_hash"]
         if not isinstance(password_hash, str):
             raise TypeError("invalid room password hash")
         if password_hash:
@@ -352,18 +345,9 @@ async def authenticate_agent(request, ws, room):
         public_key = parse_public_key(response["public_key"])
         entry = request.app[AUTHORIZED_KEYS].get(public_key_bytes(public_key))
         signature = base64.b64decode(response["signature"], validate=True)
-        valid_signature = entry is not None and verify_signature(
+        if entry is None or not verify_signature(
             entry, room, challenge, signature, password_hash
-        )
-        if (
-            not valid_signature
-            and entry is not None
-            and not has_password_policy
         ):
-            valid_signature = verify_legacy_signature(
-                entry, room, challenge, signature
-            )
-        if not valid_signature:
             raise PermissionError("public key is not authorized for this room")
     except (
         TimeoutError,
@@ -380,19 +364,7 @@ async def authenticate_agent(request, ws, room):
             await ws.send_json({"type": "auth_error", "error": "authentication failed"})
             await ws.close(code=1008, message=b"authentication failed")
         return None
-    auth_ok = {
-        "type": "auth_ok",
-        "stun_urls": request.app[STUN_URLS],
-    }
-    # Keep the old response byte-for-byte compatible for STUN-only deployments;
-    # TURN credentials require the richer field for upgraded clients.
-    if any(
-        not url.startswith("stun:")
-        for server in request.app[ICE_SERVERS]
-        for url in server["urls"]
-    ):
-        auth_ok["ice_servers"] = request.app[ICE_SERVERS]
-    await ws.send_json(auth_ok)
+    await ws.send_json({"type": "auth_ok"})
     return entry, password_hash
 
 
@@ -526,11 +498,10 @@ async def signal(request):
     return ws
 
 
-def _positive_int(config, name, default, *, minimum=1, maximum=None):
-    try:
-        value = int(config.get(name, default))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"browser_auth.{name} must be an integer") from exc
+def _positive_int(config, name, *, minimum=1, maximum=None):
+    value = config[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"browser_auth.{name} must be an integer")
     if value < minimum or (maximum is not None and value > maximum):
         raise ValueError(f"browser_auth.{name} is outside the allowed range")
     return value
@@ -538,8 +509,9 @@ def _positive_int(config, name, default, *, minimum=1, maximum=None):
 
 def create_ssl_context(tls):
     """Build the HTTPS context, or return None when both TLS paths are empty."""
-    cert = tls.get("cert", "")
-    key = tls.get("key", "")
+    validate_config_table(tls, "tls", {"cert", "key"})
+    cert = tls["cert"]
+    key = tls["key"]
     if not isinstance(cert, str) or not isinstance(key, str):
         raise TypeError("tls.cert and tls.key must be strings")
     if not cert and not key:
@@ -551,34 +523,73 @@ def create_ssl_context(tls):
     return context
 
 
-def create_app(cfg):
-    auth = cfg["auth"]
-    browser_auth = cfg.get("browser_auth", {})
-    webrtc = cfg.get("webrtc", {})
-    if not isinstance(webrtc, dict):
-        raise TypeError("webrtc must be a table")
-    if "ice_servers" not in webrtc and "stun_urls" not in webrtc:
-        webrtc = {**webrtc, "stun_urls": list(DEFAULT_STUN_URLS)}
-    ice_servers = webrtc_ice_servers(webrtc)
-    stun_urls = legacy_stun_urls(ice_servers)
-    default_room = cfg.get("server", {}).get("room", "home")
-    validate_room_name(default_room)
-    app = web.Application(client_max_size=64 * 1024)
-    app[AUTHORIZED_KEYS] = load_authorized_keys(auth["public_keys"])
-    app[AUTH_TIMEOUT] = float(auth.get("timeout", 10))
-    app[DEFAULT_ROOM] = default_room
-    app[SESSION_SECRET] = os.urandom(32)
-    app[STUN_URLS] = stun_urls
-    app[SESSION_TTL] = _positive_int(
+def validate_server_config(cfg):
+    validate_config_table(
+        cfg,
+        "server config",
+        {"server", "webrtc", "tls", "auth", "browser_auth"},
+    )
+    server = validate_config_table(
+        cfg["server"], "server", {"bind", "port"}
+    )
+    if not isinstance(server["bind"], str) or not server["bind"]:
+        raise TypeError("server.bind must be a non-empty string")
+    if (
+        isinstance(server["port"], bool)
+        or not isinstance(server["port"], int)
+        or not 1 <= server["port"] <= 65535
+    ):
+        raise ValueError("server.port must be an integer between 1 and 65535")
+    webrtc = validate_config_table(cfg["webrtc"], "webrtc", {"ice_servers"})
+    ice_servers = validate_ice_servers(webrtc["ice_servers"])
+
+    tls = validate_config_table(cfg["tls"], "tls", {"cert", "key"})
+    if not isinstance(tls["cert"], str) or not isinstance(tls["key"], str):
+        raise TypeError("tls.cert and tls.key must be strings")
+    if bool(tls["cert"]) != bool(tls["key"]):
+        raise ValueError("tls.cert and tls.key must both be empty or both be set")
+
+    auth = validate_config_table(cfg["auth"], "auth", {"public_keys", "timeout"})
+    if not isinstance(auth["public_keys"], list) or not all(
+        isinstance(key, str) for key in auth["public_keys"]
+    ):
+        raise TypeError("auth.public_keys must be an array of strings")
+    if (
+        isinstance(auth["timeout"], bool)
+        or not isinstance(auth["timeout"], (int, float))
+        or not math.isfinite(auth["timeout"])
+        or auth["timeout"] <= 0
+    ):
+        raise ValueError("auth.timeout must be a positive number")
+
+    browser_auth = validate_config_table(
+        cfg["browser_auth"],
+        "browser_auth",
+        {"session_ttl", "max_attempts", "attempt_window", "password_workers"},
+    )
+    session_ttl = _positive_int(
         browser_auth,
         "session_ttl",
-        12 * 60 * 60,
         minimum=60,
         maximum=30 * 24 * 60 * 60,
     )
-    attempts = _positive_int(browser_auth, "max_attempts", 5, maximum=100)
-    window = _positive_int(browser_auth, "attempt_window", 60, maximum=24 * 60 * 60)
-    workers = _positive_int(browser_auth, "password_workers", 2, maximum=16)
+    attempts = _positive_int(browser_auth, "max_attempts", maximum=100)
+    window = _positive_int(
+        browser_auth, "attempt_window", maximum=24 * 60 * 60
+    )
+    workers = _positive_int(browser_auth, "password_workers", maximum=16)
+    return auth, ice_servers, session_ttl, attempts, window, workers
+
+
+def create_app(cfg):
+    auth, ice_servers, session_ttl, attempts, window, workers = (
+        validate_server_config(cfg)
+    )
+    app = web.Application(client_max_size=64 * 1024)
+    app[AUTHORIZED_KEYS] = load_authorized_keys(auth["public_keys"])
+    app[AUTH_TIMEOUT] = float(auth["timeout"])
+    app[SESSION_SECRET] = os.urandom(32)
+    app[SESSION_TTL] = session_ttl
     app[LOGIN_LIMITER] = LoginLimiter(attempts, window)
     app[PASSWORD_WORKERS] = asyncio.Semaphore(workers)
     app[ICE_SERVERS] = ice_servers
@@ -604,7 +615,7 @@ def main():
     cfg = load_config(config_path)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app = create_app(cfg)
-    context = create_ssl_context(cfg.get("tls", {}))
+    context = create_ssl_context(cfg["tls"])
     web.run_app(
         app,
         host=cfg["server"]["bind"],

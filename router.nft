@@ -1,0 +1,78 @@
+#!/usr/sbin/nft -f
+
+# 本规则集由 nftables 独占管理。加载前必须停用 firewalld，且主机上不能有
+# 其他规则管理器。
+flush ruleset
+
+define wan_if     = "ppp-wan"
+define lan_if     = "enp2s0u1"
+define lan_net    = 10.21.0.0/16
+# Keep this in sync with mihomo's dns.fake-ip-range (198.18.0.1/16).
+define fake_ip_net = 198.18.0.0/16
+define proxy_addr = 127.0.0.1
+define proxy_port = 7894
+define allowed_ports = { 22000-23000, 8000-9000 }
+define ice_port = 37665
+
+table ip router {
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+
+        # LAN IPv4 只允许 DHCP 初始报文和合法 LAN 源地址。
+        iifname $lan_if ip saddr 0.0.0.0 udp sport 68 udp dport 67 return
+        iifname $lan_if ip saddr != $lan_net drop
+
+        # PPPoE WAN 不得伪造 LAN IPv4 源地址。
+        iifname $wan_if ip saddr $lan_net drop
+
+        # table 100 将 LAN 和本机发出的 fake-IP TCP/UDP 都送到本地；本机包
+        # 经 lo 再次进入此链。
+        iifname { $lan_if, "lo" } ip daddr $fake_ip_net \
+            meta l4proto { tcp, udp } \
+            tproxy ip to $proxy_addr:$proxy_port counter accept
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state invalid drop
+        ct state established,related accept
+        iifname "lo" accept
+
+        # WAN 只开放显式列出的 TCP 服务端口。
+        iifname $wan_if meta l4proto tcp tcp dport $allowed_ports accept
+
+        # Bifrost agent 直接发布 WAN host candidate。
+        iifname $wan_if meta l4proto udp udp dport $ice_port accept
+
+        # LAN 到路由器本机不做端口过滤，包括 IPv4 DHCP。
+        iifname $lan_if accept
+
+        # IPv4 错误和 echo-request。
+        icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10/second burst 20 packets accept
+
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        ct state invalid drop
+        ct state established,related accept
+
+        # 非 fake-ip 的 LAN TCP/UDP/ICMP 直连 WAN，不经过 mihomo。
+        iifname $lan_if oifname $wan_if ip saddr $lan_net \
+            ip daddr != $fake_ip_net meta l4proto { tcp, udp, icmp } accept
+
+        counter drop
+    }
+
+    chain postrouting_nat {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        # fake-IP TCP/UDP 已在 prerouting 本地送入 mihomo；其他 IPv4 TCP/UDP
+        # 和 ICMP 走直连并由此处做源地址伪装。
+        oifname $wan_if ip saddr $lan_net masquerade
+    }
+}

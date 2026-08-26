@@ -8,16 +8,28 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from bifrost.auth import (
     auth_payload,
-    legacy_auth_payload,
     load_authorized_keys,
     load_private_key,
     public_key_bytes,
     public_key_text,
-    verify_legacy_signature,
     verify_signature,
 )
-from bifrost.protocol import DEFAULT_STUN_URLS
 from bifrost.server import create_app, rooms
+
+
+def server_config(public_keys):
+    return {
+        'server': {'bind': '127.0.0.1', 'port': 8443},
+        'webrtc': {'ice_servers': []},
+        'tls': {'cert': '', 'key': ''},
+        'auth': {'public_keys': public_keys, 'timeout': 1},
+        'browser_auth': {
+            'session_ttl': 43200,
+            'max_attempts': 5,
+            'attempt_window': 60,
+            'password_workers': 2,
+        },
+    }
 
 
 def write_private_key(path, key):
@@ -43,12 +55,12 @@ def test_load_private_key_and_authorized_keys(tmp_path):
     authorized = load_authorized_keys([authorized_path.read_text(encoding='utf-8')])
     entry = authorized[public_key_bytes(loaded_private.public_key())]
     challenge = b'x' * 32
-    signature = loaded_private.sign(auth_payload('home', challenge))
+    signature = loaded_private.sign(auth_payload('home', challenge, ""))
 
     assert entry.permits('home')
     assert not entry.permits('office')
-    assert verify_signature(entry, 'home', challenge, signature)
-    assert not verify_signature(entry, 'office', challenge, signature)
+    assert verify_signature(entry, 'home', challenge, signature, "")
+    assert not verify_signature(entry, 'office', challenge, signature, "")
 
 
 def test_agent_websocket_authentication(tmp_path):
@@ -60,21 +72,21 @@ def test_agent_websocket_authentication(tmp_path):
             f'room="home" {public_key_text(private_key.public_key())}\n',
             encoding='utf-8',
         )
-        app = create_app({'auth': {'public_keys': [authorized_path.read_text(encoding='utf-8')], 'timeout': 1}})
+        app = create_app(server_config([
+            authorized_path.read_text(encoding='utf-8')
+        ]))
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect('/signal?role=agent&room=home')
             challenge_message = await ws.receive_json()
             challenge = base64.b64decode(challenge_message['challenge'])
-            signature = private_key.sign(auth_payload('home', challenge))
+            signature = private_key.sign(auth_payload('home', challenge, ""))
             await ws.send_json({
                 'type': 'auth_response',
                 'public_key': public_key_text(private_key.public_key()),
                 'signature': base64.b64encode(signature).decode('ascii'),
+                'password_hash': '',
             })
-            assert await ws.receive_json() == {
-                'type': 'auth_ok',
-                'stun_urls': list(DEFAULT_STUN_URLS),
-            }
+            assert await ws.receive_json() == {'type': 'auth_ok'}
             assert rooms['home']['agent'] is not None
             await ws.close()
         rooms.clear()
@@ -91,12 +103,14 @@ def test_agent_key_cannot_access_unauthorized_room(tmp_path):
             f'room="home" {public_key_text(private_key.public_key())}\n',
             encoding='utf-8',
         )
-        app = create_app({'auth': {'public_keys': [authorized_path.read_text(encoding='utf-8')], 'timeout': 1}})
+        app = create_app(server_config([
+            authorized_path.read_text(encoding='utf-8')
+        ]))
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect('/signal?role=agent&room=office')
             challenge_message = await ws.receive_json()
             challenge = base64.b64decode(challenge_message['challenge'])
-            signature = private_key.sign(auth_payload('office', challenge))
+            signature = private_key.sign(auth_payload('office', challenge, ""))
             await ws.send_json({
                 'type': 'auth_response',
                 'public_key': public_key_text(private_key.public_key()),
@@ -134,7 +148,3 @@ def test_agent_signature_binds_room_password_policy():
 
     assert verify_signature(entry, "home", challenge, signature, "hash-one")
     assert not verify_signature(entry, "home", challenge, signature, "hash-two")
-
-    old_signature = key.sign(legacy_auth_payload("home", challenge))
-    assert verify_legacy_signature(entry, "home", challenge, old_signature)
-    assert not verify_signature(entry, "home", challenge, old_signature)

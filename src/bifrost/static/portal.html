@@ -22,7 +22,7 @@ small{display:block;margin-top:20px;color:#7a8497;line-height:1.5}
   <p>输入 room 名称。受保护的 room 会在下一步验证访问密码。</p>
   <form action="/" method="get">
     <label for="room">Room 名称</label>
-    <input id="room" name="room" value="{{DEFAULT_ROOM}}" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" autocomplete="off" autofocus required>
+    <input id="room" name="room" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" autocomplete="off" autofocus required>
     <button type="submit">继续</button>
   </form>
   <div class="error" role="alert">{{ERROR}}</div>

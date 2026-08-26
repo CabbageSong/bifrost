@@ -16,7 +16,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 _AUTH_DOMAIN = b"bifrost-agent-auth-v2\0"
-_LEGACY_AUTH_DOMAIN = b"bifrost-agent-auth-v1\0"
 _KEY_TYPE = "ssh-ed25519"
 _ROOM_OPTION = re.compile(r'(?:^|,)\s*room\s*=\s*(?:"([^"]+)"|([^,\s]+))')
 
@@ -50,7 +49,7 @@ def fingerprint(public_key: Ed25519PublicKey) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
-def auth_payload(room: str, challenge: bytes, password_hash: str = "") -> bytes:
+def auth_payload(room: str, challenge: bytes, password_hash: str) -> bytes:
     """Build a signed agent registration, including the room access policy."""
     room_bytes = room.encode("utf-8")
     password_hash_bytes = password_hash.encode("ascii")
@@ -70,28 +69,12 @@ def auth_payload(room: str, challenge: bytes, password_hash: str = "") -> bytes:
     )
 
 
-def legacy_auth_payload(room: str, challenge: bytes) -> bytes:
-    """Build the v1 open-room payload for rolling-upgrade compatibility."""
-    room_bytes = room.encode("utf-8")
-    if len(room_bytes) > 65535:
-        raise ValueError("room name is too long")
-    if len(challenge) != 32:
-        raise ValueError("authentication challenge must be 32 bytes")
-    return (
-        _LEGACY_AUTH_DOMAIN
-        + len(room_bytes).to_bytes(2, "big")
-        + room_bytes
-        + challenge
-    )
-
-
-def load_private_key(path: str | Path, password: str | None = None) -> Ed25519PrivateKey:
+def load_private_key(path: str | Path) -> Ed25519PrivateKey:
     data = Path(path).expanduser().read_bytes()
-    password_bytes = password.encode("utf-8") if password is not None else None
     errors: list[Exception] = []
     for loader in (serialization.load_ssh_private_key, serialization.load_pem_private_key):
         try:
-            key = loader(data, password=password_bytes)
+            key = loader(data, password=None)
             break
         except (TypeError, ValueError) as exc:
             errors.append(exc)
@@ -100,11 +83,6 @@ def load_private_key(path: str | Path, password: str | None = None) -> Ed25519Pr
     if not isinstance(key, Ed25519PrivateKey):
         raise ValueError(f"private key {path!s} is not an Ed25519 key")
     return key
-
-
-def load_public_key(path: str | Path) -> Ed25519PublicKey:
-    """Load an Ed25519 public key from an OpenSSH ``.pub`` file."""
-    return parse_public_key(Path(path).expanduser().read_text(encoding="utf-8"))
 
 
 def parse_public_key(text: str) -> Ed25519PublicKey:
@@ -170,7 +148,7 @@ def verify_signature(
     room: str,
     challenge: bytes,
     signature: bytes,
-    password_hash: str = "",
+    password_hash: str,
 ) -> bool:
     if not entry.permits(room):
         return False
@@ -179,21 +157,5 @@ def verify_signature(
             signature, auth_payload(room, challenge, password_hash)
         )
     except (InvalidSignature, UnicodeEncodeError, ValueError):
-        return False
-    return True
-
-
-def verify_legacy_signature(
-    entry: AuthorizedKey,
-    room: str,
-    challenge: bytes,
-    signature: bytes,
-) -> bool:
-    """Verify a pre-room-password agent; these agents can only register open rooms."""
-    if not entry.permits(room):
-        return False
-    try:
-        entry.public_key.verify(signature, legacy_auth_payload(room, challenge))
-    except (InvalidSignature, ValueError):
         return False
     return True

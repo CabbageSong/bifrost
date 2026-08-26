@@ -69,6 +69,62 @@ def test_answer_uses_fixed_ice_host_candidate_port():
     asyncio.run(scenario())
 
 
+def test_empty_client_ice_list_uses_direct_configuration(monkeypatch):
+    captured = {}
+
+    class Signal:
+        closed = False
+
+        def __aiter__(self):
+            async def messages():
+                if False:
+                    yield None
+
+            return messages()
+
+    class Connection:
+        async def __aenter__(self):
+            return Signal()
+
+        async def __aexit__(self, *args):
+            pass
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def ws_connect(self, *args, **kwargs):
+            return Connection()
+
+    async def authenticate(*args, **kwargs):
+        return None
+
+    def rtc_configuration(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(agent.aiohttp, "ClientSession", Session)
+    monkeypatch.setattr(agent, "authenticate", authenticate)
+    monkeypatch.setattr(agent, "RTCConfiguration", rtc_configuration)
+
+    cfg = {
+        "signal": {
+            "url": "wss://example.test",
+            "room": "home",
+            "verify_tls": True,
+        },
+        "auth": {"timeout": 10},
+        "browser_auth": {"password_hash": ""},
+        "webrtc": {"ice_servers": [], "ice_port": 37665},
+    }
+    asyncio.run(agent.run_agent(cfg, None, identity=(object(), object())))
+
+    assert captured["iceServers"] == []
+
+
 def test_serve_agent_backs_off_connection_failures_without_tracebacks(
     monkeypatch, caplog
 ):

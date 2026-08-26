@@ -33,7 +33,7 @@ server 默认按 `[tls]` 配置使用 HTTPS/WSS。如果 `tls.cert` 和 `tls.key
 
 ## ICE、STUN 与 TURN 配置
 
-server 的 `[webrtc].ice_servers` 会注入浏览器页面，同时在 agent 认证成功后通过信令下发。client 的非空 `ice_servers` 优先于 server 下发列表；设为空数组或省略 `[webrtc]` 时使用 server 列表：
+server 的 `[webrtc].ice_servers` 只会注入浏览器页面。client 只使用自己 `[webrtc].ice_servers` 中的显式配置；配置 `ice_servers = []` 时，agent 只发布本机 host candidates：
 
 ```toml
 [webrtc]
@@ -51,18 +51,21 @@ username = "bifrost"
 credential = "replace-with-a-strong-secret"
 ```
 
-旧的 `stun_urls = [...]` 配置仍然兼容，但只能配置 STUN。公共 STUN 只能发现公网映射，不能让对称 NAT、运营商 CGNAT 或严格防火墙必然打洞成功。日志中若候选检查持续失败，且没有 `relay` candidate，就需要 TURN；继续增加公共 STUN 地址通常不能解决。
+公共 STUN 只能发现公网映射，不能让对称 NAT、运营商 CGNAT 或严格防火墙必然打洞成功。日志中若候选检查持续失败，且没有 `relay` candidate，就需要 TURN；继续增加公共 STUN 地址通常不能解决。
 
-agent 侧可以为每个 room 固定一个本地 ICE UDP 端口：
+agent 要求每个 room 显式配置 ICE UDP 端口：
 
 ```toml
 [[services]]
 room = "home"
 local_port = 18080
-ice_port = 40000
+ice_port = 37665
+host = "127.0.0.1"
+scheme = "http"
+password_hash = ""
 ```
 
-此时应放行 `40000/udp`。如果公网 IP 直接配置在 agent 网卡上，防火墙放行即可；如果 agent 日志仍显示私网地址，必须再配置同端口静态映射，例如 `116.230.250.209:40000/udp -> 10.21.0.1:40000/udp`。启动后日志会同时打印 `local=40000` 和 STUN 发现的 `public=[...]`；若公网端口不是 `40000`，说明上级 NAT 仍在改写端口，日志会提示配置 same-port mapping。多个 room 同时使用时，每个 service 必须配置不同的 `ice_port`。
+防火墙应放行对应的 `37665/udp`，例如在 nftables 的 WAN `input` 链中加入 `iifname $wan_if udp dport 37665 accept`。如果公网 IP 直接配置在 agent 网卡上，aiortc 会自动把该 IP 和 `37665` 作为 host candidate 写入 SDP，无需 STUN。如果 agent 只有私网地址，则需要显式配置 STUN/TURN；单纯做端口映射不会让 agent 知道应该发布哪个公网 IP。多个 room 同时使用时，每个 service 必须显式配置不同的 `ice_port`。
 
 可以把 coturn 部署在公网主机上。典型配置至少包含 `fingerprint`、`lt-cred-mech`、`realm`、`user`、`external-ip`，并用 `min-port` / `max-port` 限定 relay 端口范围。防火墙和云安全组需要放行 TURN 监听端口（通常为 UDP/TCP 3478）以及配置的 UDP relay 端口范围。例如将范围设为 `49160-49200`，就必须同时放行该段 UDP 端口。然后把相同用户名和密码填入上面的 TURN 条目。
 
@@ -70,7 +73,7 @@ ice_port = 40000
 
 TURN 凭据必须下发给浏览器。免密 room 的静态凭据因此会暴露给所有访问者，可能被滥用；生产环境应保护 room、限制 coturn 配额，并定期轮换凭据。当前 Bifrost 支持静态 TURN 用户名/密码，尚未生成 TURN REST API 临时凭据。
 
-只需要在 server 集中配置时，client 使用：
+要显式禁用 client 侧 STUN/TURN，使用：
 
 ```toml
 [webrtc]
@@ -91,6 +94,7 @@ room = "public-app"
 host = "127.0.0.1"
 scheme = "http"
 local_port = 10080
+ice_port = 37665
 password_hash = ""
 ```
 
@@ -119,10 +123,11 @@ room = "home"
 host = "127.0.0.1"
 scheme = "http"
 local_port = 10081
+ice_port = 37665
 password_hash = "$scrypt$v=1$n=32768,r=8,p=1$<salt>$<derived-key>"
 ```
 
-`password_hash = ""` 表示免密 room；字段省略时也按空哈希处理。明文 `password` 配置已不再接受，使用 `bifrost-hash-password` 生成哈希后再写入 TOML。
+`password_hash = ""` 表示免密 room。该字段不能省略；明文 `password` 配置也不接受，使用 `bifrost-hash-password` 生成哈希后再写入 TOML。
 
 server 端可以调整会话时长和密码尝试限制：
 
@@ -149,12 +154,10 @@ password_workers = 2      # 并发 scrypt 校验数，限制内存/CPU 消耗
 
 Agent 注册到信令服务器前会完成一次 Ed25519 challenge-response 验证。私钥只保存在 agent，server 直接在 TOML 配置中保存多个 OpenSSH `.pub` / `authorized_keys` 风格的公钥文本；随机 challenge、协议域、room 和浏览器访问策略会一起签名，因此签名不能跨连接、跨 room 重放或被改成免密策略。
 
-本版本的 server 仍接受旧 agent 的 v1 签名，但只能把这种连接注册为免密 room。滚动升级时应先升级 server，再升级 client；启用 `password_hash` 必须使用新版 client。
-
 生成密钥并部署公钥：
 
 ```bash
-ssh-keygen -t ed25519 -f /opt/bifrost/keys/agent_ed25519
+ssh-keygen -q -t ed25519 -N "" -f /opt/bifrost/keys/agent_ed25519
 install -m 600 /opt/bifrost/keys/agent_ed25519 /path/on/agent/agent_ed25519
 cat /opt/bifrost/keys/agent_ed25519.pub
 ```
@@ -175,7 +178,6 @@ client 配置：
 ```toml
 [auth]
 private_key = "/path/on/agent/agent_ed25519"
-public_key = "/path/on/agent/agent_ed25519.pub"
 timeout = 10
 ```
 
@@ -214,7 +216,7 @@ url = "wss://v.phenix.my:8443/signal"
 verify_tls = true
 
 [webrtc]
-# 空数组表示采用 server 通过认证响应下发的列表。
+# 空数组表示只发布本机 host candidates。
 ice_servers = []
 
 [[services]]
@@ -222,7 +224,7 @@ room = "home"
 host = "127.0.0.1"
 scheme = "http"
 local_port = 10080
-ice_port = 40000
+ice_port = 37665
 password_hash = "$scrypt$v=1$n=32768,r=8,p=1$...$..."
 
 [[services]]
@@ -230,16 +232,15 @@ room = "office"
 host = "127.0.0.1"
 scheme = "http"
 local_port = 10081
-ice_port = 40001
+ice_port = 37666
 password_hash = ""
 
 [auth]
 private_key = "/opt/bifrost/keys/agent_ed25519"
-public_key = "/opt/bifrost/keys/agent_ed25519.pub"
 timeout = 10
 ```
 
-同一个 client 进程会并行注册 `home` 和 `office`，分别转发到各自 `[[services]]` 配置的目标。`scheme` 只能是 `http` 或 `https`；room 不允许重复，名称必须是 1–64 个 ASCII 字母、数字、点、下划线或连字符并以字母/数字开头；端口范围必须是 1 到 65535。旧配置中的全局 `[local_http]` 仍作为 host/scheme 的 fallback，但新配置建议直接写在每个 service 中。server 的 `public_keys` 必须允许该公钥进入对应 room。
+同一个 client 进程会并行注册 `home` 和 `office`，分别转发到各自 `[[services]]` 配置的目标。`scheme` 只能是 `http` 或 `https`；room 不允许重复，名称必须是 1–64 个 ASCII 字母、数字、点、下划线或连字符并以字母/数字开头；端口范围必须是 1 到 65535。server 的 `public_keys` 必须允许该公钥进入对应 room。启用的 table 和功能所需字段都必须显式写入 TOML；缺失或未知字段会使进程拒绝启动。STUN 条目只接受 `urls`，TURN 条目还必须显式配置 `username` 和 `credential`。
 
 ## 安装与打包
 

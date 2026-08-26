@@ -1,38 +1,49 @@
 import asyncio
-import json
 
 import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from bifrost.client import configured_services, handle_http
+from bifrost.client import configured_services, proxy_http
 from bifrost.protocol import decode_body, encode_body
 
 
-class Channel:
-    def __init__(self):
-        self.messages = []
-
-    def send(self, raw):
-        self.messages.append(json.loads(raw))
-
-
-def test_empty_or_missing_password_hash_means_public_room():
-    base = {
-        "signal": {"url": "wss://example.test/signal"},
-        "auth": {},
-        "services": [
-            {
-                "room": "empty",
-                "local_port": 8001,
-                "host": "127.0.0.2",
-                "scheme": "https",
-                "password_hash": "",
-            },
-            {"room": "missing", "local_port": 8002},
-        ],
+def config(services):
+    complete_services = []
+    for index, service in enumerate(services):
+        complete = {
+            'room': f'room-{index}',
+            'local_port': 10080 + index,
+            'ice_port': 37665 + index,
+            'host': '127.0.0.1',
+            'scheme': 'http',
+            'password_hash': '',
+        }
+        complete.update(service)
+        complete_services.append(complete)
+    return {
+        'signal': {'url': 'wss://example.test/signal', 'verify_tls': True},
+        'webrtc': {'ice_servers': []},
+        'auth': {
+            'private_key': 'private',
+            'timeout': 10,
+        },
+        'services': complete_services,
     }
+
+
+def test_empty_password_hash_means_public_room():
+    base = config([
+        {
+            "room": "empty",
+            "local_port": 8001,
+            "host": "127.0.0.2",
+            "scheme": "https",
+            "password_hash": "",
+        },
+        {"room": "also-empty", "local_port": 8002},
+    ])
     services = configured_services(base)
 
     assert services[0][2]["browser_auth"]["password_hash"] == ""
@@ -42,20 +53,10 @@ def test_empty_or_missing_password_hash_means_public_room():
 
 
 def test_service_rejects_plaintext_passwords():
-    with pytest.raises(ValueError, match="unsupported password"):
-        configured_services(
-            {
-                "signal": {},
-                "auth": {},
-                "services": [
-                    {
-                        "room": "home",
-                        "local_port": 8001,
-                        "password": "secret",
-                    }
-                ],
-            }
-        )
+    cfg = config([{"room": "home", "local_port": 8001}])
+    cfg["services"][0]["password"] = "secret"
+    with pytest.raises(ValueError, match="unsupported field: password"):
+        configured_services(cfg)
 
 
 def test_service_rejects_invalid_host_or_scheme():
@@ -67,13 +68,6 @@ def test_service_rejects_invalid_host_or_scheme():
         configured_services(
             config([{"room": "home", "local_port": 8001, "host": "http://x"}])
         )
-
-
-def test_legacy_local_http_is_a_service_default():
-    cfg = config([{"room": "home", "local_port": 8001}])
-    cfg["local_http"] = {"host": "legacy.test", "scheme": "https"}
-
-    assert configured_services(cfg)[0][1] == "https://legacy.test:8001"
 
 
 @pytest.mark.parametrize(
@@ -88,7 +82,7 @@ def test_legacy_local_http_is_a_service_default():
         ("OPTIONS", b""),
     ],
 )
-def test_handle_http_forwards_common_methods(method, body):
+def test_proxy_http_forwards_common_methods(method, body):
     async def scenario():
         async def resource(request):
             received = await request.read()
@@ -101,29 +95,23 @@ def test_handle_http_forwards_common_methods(method, body):
         app.router.add_route("*", "/resource", resource)
         server = TestServer(app)
         await server.start_server()
-        channel = Channel()
-
         try:
             async with aiohttp.ClientSession() as session:
-                await handle_http(
-                    channel,
-                    json.dumps(
-                        {
-                            "type": "http_request",
-                            "id": method,
-                            "method": method,
-                            "path": "/resource",
-                            "headers": {"x-forwarded-test": "yes"},
-                            "body_base64": encode_body(body),
-                        }
-                    ),
+                response = await proxy_http(
+                    {
+                        "type": "http_request",
+                        "id": method,
+                        "method": method,
+                        "path": "/resource",
+                        "headers": {"x-forwarded-test": "yes"},
+                        "body_base64": encode_body(body),
+                    },
                     str(server.make_url("/")),
                     session,
                 )
         finally:
             await server.close()
 
-        response = channel.messages.pop()
         assert response["status"] == 200
         assert response["headers"]["x-request-method"] == method
         assert decode_body(response["body_base64"]) == (
@@ -133,7 +121,7 @@ def test_handle_http_forwards_common_methods(method, body):
     asyncio.run(scenario())
 
 
-def test_handle_http_reuses_cookies_and_reports_redirect_url():
+def test_proxy_http_reuses_cookies_and_reports_redirect_url():
     async def scenario():
         async def login(request):
             response = web.HTTPFound("/account")
@@ -148,41 +136,37 @@ def test_handle_http_reuses_cookies_and_reports_redirect_url():
         app.router.add_get("/account", account)
         server = TestServer(app)
         await server.start_server()
-        channel = Channel()
         jar = aiohttp.CookieJar(unsafe=True)
 
         try:
             async with aiohttp.ClientSession(cookie_jar=jar) as session:
-                await handle_http(
-                    channel,
-                    json.dumps(
-                        {
-                            "type": "http_request",
-                            "id": "login",
-                            "method": "POST",
-                            "path": "/login",
-                        }
-                    ),
+                login = await proxy_http(
+                    {
+                        "type": "http_request",
+                        "id": "login",
+                        "method": "POST",
+                        "path": "/login",
+                        "headers": {},
+                        "body_base64": "",
+                    },
                     str(server.make_url("/")),
                     session,
                 )
-                await handle_http(
-                    channel,
-                    json.dumps(
-                        {
-                            "type": "http_request",
-                            "id": "account",
-                            "method": "GET",
-                            "path": "/account",
-                        }
-                    ),
+                account = await proxy_http(
+                    {
+                        "type": "http_request",
+                        "id": "account",
+                        "method": "GET",
+                        "path": "/account",
+                        "headers": {},
+                        "body_base64": "",
+                    },
                     str(server.make_url("/")),
                     session,
                 )
         finally:
             await server.close()
 
-        login, account = channel.messages
         assert login["response_url"] == "/account"
         assert decode_body(login["body_base64"]) == b"active"
         assert decode_body(account["body_base64"]) == b"active"
@@ -190,25 +174,17 @@ def test_handle_http_reuses_cookies_and_reports_redirect_url():
     asyncio.run(scenario())
 
 
-def config(services):
-    return {
-        'signal': {'url': 'wss://example.test/signal', 'verify_tls': True},
-        'auth': {'private_key': 'private', 'public_key': 'public'},
-        'services': services,
-    }
-
-
 def test_configured_services_supports_multiple_rooms():
     cfg = config([
         {'room': 'home', 'local_port': 10080},
-        {'room': 'office', 'local_port': 10081},
+        {'room': 'office', 'local_port': 10081, 'ice_port': 37666},
     ])
-    cfg['webrtc'] = {
-        'stun_urls': [
+    cfg['webrtc'] = {'ice_servers': [{
+        'urls': [
             'stun:stun.miwifi.com:3478',
             'stun:stun.cloudflare.com:3478',
-        ]
-    }
+        ],
+    }]}
     services = configured_services(cfg)
     assert [(room, target) for room, target, _ in services] == [
         ('home', 'http://127.0.0.1:10080'),
@@ -216,16 +192,71 @@ def test_configured_services_supports_multiple_rooms():
     ]
     assert services[0][2]['signal']['room'] == 'home'
     assert services[1][2]['signal']['room'] == 'office'
-    assert services[0][2]['webrtc']['stun_urls'] == cfg['webrtc']['stun_urls']
+    assert services[0][2]['webrtc']['ice_servers'] == cfg['webrtc']['ice_servers']
 
 
-def test_empty_client_stun_urls_are_preserved_for_server_fallback():
+def test_empty_client_ice_servers_disable_client_side_stun():
     cfg = config([{'room': 'home', 'local_port': 10080}])
-    cfg['webrtc'] = {'stun_urls': []}
 
     services = configured_services(cfg)
 
-    assert services[0][2]['webrtc']['stun_urls'] == []
+    assert services[0][2]['webrtc']['ice_servers'] == []
+    assert services[0][2]['webrtc']['ice_port'] == 37665
+
+
+def test_missing_client_ice_config_is_rejected():
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    del cfg['webrtc']
+
+    with pytest.raises(ValueError, match='missing required field: webrtc'):
+        configured_services(cfg)
+
+
+def test_missing_service_ice_port_is_rejected():
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    del cfg['services'][0]['ice_port']
+
+    with pytest.raises(ValueError, match='missing required field: ice_port'):
+        configured_services(cfg)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("signal",),
+        ("webrtc",),
+        ("services",),
+        ("auth",),
+        ("signal", "url"),
+        ("signal", "verify_tls"),
+        ("webrtc", "ice_servers"),
+        ("auth", "private_key"),
+        ("auth", "timeout"),
+        ("services", 0, "room"),
+        ("services", 0, "local_port"),
+        ("services", 0, "ice_port"),
+        ("services", 0, "host"),
+        ("services", 0, "scheme"),
+        ("services", 0, "password_hash"),
+    ],
+)
+def test_client_rejects_every_missing_required_field(path):
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    target = cfg
+    for key in path[:-1]:
+        target = target[key]
+    del target[path[-1]]
+
+    with pytest.raises(ValueError, match=f"missing required field: {path[-1]}"):
+        configured_services(cfg)
+
+
+def test_client_rejects_unknown_config_fields():
+    cfg = config([{'room': 'home', 'local_port': 10080}])
+    cfg['signal']['retry_delay'] = 5
+
+    with pytest.raises(ValueError, match='unsupported field: retry_delay'):
+        configured_services(cfg)
 
 
 def test_client_accepts_turn_ice_servers():
@@ -238,7 +269,10 @@ def test_client_accepts_turn_ice_servers():
 
     services = configured_services(cfg)
 
-    assert services[0][2]['webrtc'] == cfg['webrtc']
+    assert services[0][2]['webrtc'] == {
+        **cfg['webrtc'],
+        'ice_port': 37665,
+    }
 
 
 def test_client_passes_a_distinct_fixed_ice_port_to_each_room():
@@ -272,18 +306,6 @@ def test_client_rejects_duplicate_fixed_ice_ports():
     ])
 
     with pytest.raises(ValueError, match='duplicate ice_port'):
-        configured_services(cfg)
-
-
-@pytest.mark.parametrize(
-    'stun_urls',
-    ['stun:example.com:3478', ['turn:example.com:3478'], [42]],
-)
-def test_client_rejects_invalid_stun_configuration(stun_urls):
-    cfg = config([{'room': 'home', 'local_port': 10080}])
-    cfg['webrtc'] = {'stun_urls': stun_urls}
-
-    with pytest.raises((TypeError, ValueError), match='stun'):
         configured_services(cfg)
 
 
