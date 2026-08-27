@@ -29,11 +29,9 @@ def test_static_page_bridges_http_methods_and_browser_apis():
     text = files("bifrost").joinpath("static/index.html").read_text(encoding="utf-8")
     assert "method:method||'GET'" in text
     assert "window.fetch=function" in text
-    assert "window.XMLHttpRequest=ProxyXHR" in text
     assert "window.addEventListener('submit'" in text
     assert "if(!form||e.defaultPrevented)return" in text
     assert "document.addEventListener('submit'" not in text
-    assert "navigator.sendBeacon=function" in text
     assert "body_base64" in text
     assert "formmethod" in text
     assert "response_url" in text

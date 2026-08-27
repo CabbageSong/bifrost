@@ -82,7 +82,7 @@ ice_servers = []
 
 首次 demo 使用自签名证书，浏览器需手动信任证书。页面内的导航栏会拦截内网页面的站内超链接，通过同一条 DataChannel 请求新 URI；浏览器真实地址保持在 Bifrost 页面，连接 ID/建立时间用于确认是否重连。
 
-浏览器 iframe 中的超链接、表单提交、程序化页面跳转、`fetch`、`XMLHttpRequest` 和 `sendBeacon` 会被桥接到同一条 DataChannel。请求方法、请求头和请求体会传给内网 client，因此 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 及其他 aiohttp 接受的方法都可以转发；二进制请求体和响应体使用 Base64 保留原始字节。client 会为同一 WebRTC peer 复用 HTTP session，因此连接池和 Cookie 可以跨请求保留。
+浏览器 iframe 中的超链接、表单提交、程序化页面跳转和 `fetch` 会被桥接到同一条 DataChannel。请求方法、请求头和请求体会传给内网 client，因此 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 及其他 aiohttp 接受的方法都可以转发；二进制请求体和响应体使用 Base64 保留原始字节。client 会为同一 WebRTC peer 复用 HTTP session，因此连接池和 Cookie 可以跨请求保留。
 
 HTML 中常见的样式表、脚本、图标、图片和媒体 `src` 会先经 DataChannel 读取，再以浏览器本地 Object URL 加载。iframe 中的 WebSocket 也会通过 DataChannel 连接到同一内网 service，支持文本帧、二进制帧、子协议和关闭事件。CSS 内部的 `url(...)`、`srcset`、同步 XHR 和流式 HTTP 请求目前不经过桥接。
 
