@@ -18,7 +18,7 @@ html,body{margin:0;height:100%;font:14px system-ui}
 <main id="view"></main>
 <script>
 const bifrostConfig = /* BIFROST_CONFIG */;
-let shellUrl=new URL(location.href),room=bifrostConfig.room||shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null;
+let shellUrl=new URL(location.href),room=bifrostConfig.room||shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null,frameSerial=0,appSockets=new Map(),assetUrls=[];
 shellUrl.searchParams.delete('room');
 let currentPath=bifrostConfig.path||shellUrl.pathname+shellUrl.search,connectedAt=null,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;
 const $=x=>document.getElementById(x);
@@ -57,6 +57,7 @@ function request(method,path,headers={},bodyBase64=''){
   return new Promise((ok,no)=>{
     let id=++seq;
     if(!dc||dc.readyState!=='open'){no(Error('WebRTC 数据通道未连接'));return}
+    path=(path||'/').split('#',1)[0]||'/';
     pending.set(id,{ok,no});
     let msg={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{},body_base64:bodyBase64};
     try{dc.send(JSON.stringify(msg))}catch(e){pending.delete(id);no(e);return}
@@ -79,7 +80,7 @@ function frameHook(basePath){
     function bytes(s){var b=atob(s||''),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
     function headersObject(h){var o={};if(!h)return o;if(h.forEach)h.forEach(function(v,k){o[k]=v});else if(Array.isArray(h))h.forEach(function(x){o[x[0]]=x[1]});else Object.keys(h).forEach(function(k){o[k]=h[k]});return o}
     function hasHeader(h,name){name=name.toLowerCase();return Object.keys(h).some(function(k){return k.toLowerCase()===name})}
-    function toPath(value){var fallback='http://bifrost.invalid'+BASE,b=document.querySelector('base[href]'),base=fallback;if(b)try{base=new URL(b.getAttribute('href'),fallback).href}catch(_){}var u=new URL(String(value),base);if(!/^https?:$/.test(u.protocol))throw Error('不支持的 URL 协议');return u.pathname+u.search+u.hash}
+    function toPath(value,includeHash){var fallback='http://bifrost.invalid'+BASE,b=document.querySelector('base[href]'),base=fallback;if(b)try{base=new URL(b.getAttribute('href'),fallback).href}catch(_){}var u=new URL(String(value),base),path=u.pathname+u.search;if(!/^https?:$/.test(u.protocol))throw Error('不支持的 URL 协议');return includeHash?path+u.hash:path}
     function ask(method,url,headers,bodyBase64,navigate){
       return new Promise(function(resolve,reject){var id=++next;calls.set(id,{resolve:resolve,reject:reject});parent.postMessage({type:'bifrost-request',requestId:id,method:method||'GET',url:toPath(url),headers:headersObject(headers),body_base64:bodyBase64,navigate:!!navigate},'*')})
     }
@@ -112,6 +113,18 @@ function frameHook(basePath){
     function responseFrom(r){var status=r.status||200,data=bytes(r.body_base64);if(status===204||status===205||status===304)data=null;var response=new NativeResponse(data,{status:status,statusText:r.status_text||'',headers:r.headers||{}});if(r.response_url)Object.defineProperty(response,'url',{value:r.response_url});return response}
     function responseText(r){return new TextDecoder().decode(bytes(r.body_base64))}
     window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-response')return;var p=calls.get(e.data.requestId);if(!p)return;calls.delete(e.data.requestId);if(e.data.error)p.reject(Error(e.data.error));else p.resolve(e.data.response||{})});
+    window.__bifrostNavigate=function(value){parent.postMessage({type:'bifrost-nav',href:toPath(value,true)},'*')};
+    var socketNext=0,sockets=new Map();
+    function socketUrl(value){var raw=String(value),fallback='ws://bifrost.invalid'+BASE;if(/^wss?:\/\/\//i.test(raw))raw=raw.replace(/^(wss?):\/\/\//i,'$1://bifrost.invalid/');var u=new URL(raw,fallback);if(!/^wss?:$/.test(u.protocol))throw new DOMException('Unsupported WebSocket URL','SyntaxError');return u}
+    function socketProtocols(protocols){var list=protocols===undefined?[]:(Array.isArray(protocols)?protocols:[protocols]),seen=new Set();return list.map(function(value){value=String(value);if(!/^[!#$%&'*+\-.^_\x60|~0-9A-Za-z]+$/.test(value)||seen.has(value))throw new DOMException('Invalid WebSocket protocol','SyntaxError');seen.add(value);return value})}
+    class ProxyWebSocket extends EventTarget{
+      constructor(url,protocols){super();var u=socketUrl(url),list=socketProtocols(protocols);this.url=u.href;this.readyState=ProxyWebSocket.CONNECTING;this.bufferedAmount=0;this.extensions='';this.protocol='';this.binaryType='blob';this._id=String(++socketNext);sockets.set(this._id,this);parent.postMessage({type:'bifrost-websocket',action:'open',socketId:this._id,url:u.href,protocols:list},'*')}
+      _emit(type,event){this.dispatchEvent(event);var handler=this['on'+type];if(typeof handler==='function')handler.call(this,event)}
+      send(data){if(this.readyState!==ProxyWebSocket.OPEN)throw new DOMException('WebSocket is not open','InvalidStateError');var self=this;if(typeof data==='string'){parent.postMessage({type:'bifrost-websocket',action:'send',socketId:this._id,data_type:'text',data:data},'*');return}var promise=data instanceof NativeBlob?data.arrayBuffer():data instanceof ArrayBuffer?Promise.resolve(data):ArrayBuffer.isView(data)?Promise.resolve(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength)):Promise.reject(new TypeError('Unsupported WebSocket message'));promise.then(function(buffer){if(self.readyState===ProxyWebSocket.OPEN)parent.postMessage({type:'bifrost-websocket',action:'send',socketId:self._id,data_type:'binary',data:b64(buffer)},'*')}).catch(function(){self._emit('error',new Event('error'))})}
+      close(code,reason){if(code!==undefined&&code!==1000&&!(code>=3000&&code<=4999))throw new DOMException('Invalid WebSocket close code','InvalidAccessError');reason=reason===undefined?'':String(reason);if(new TextEncoder().encode(reason).length>123)throw new DOMException('WebSocket close reason is too long','SyntaxError');if(this.readyState===ProxyWebSocket.CLOSED||this.readyState===ProxyWebSocket.CLOSING)return;this.readyState=ProxyWebSocket.CLOSING;parent.postMessage({type:'bifrost-websocket',action:'close',socketId:this._id,code:code===undefined?1000:code,reason:reason},'*')}
+    }
+    Object.assign(ProxyWebSocket,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});Object.assign(ProxyWebSocket.prototype,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});window.WebSocket=ProxyWebSocket;
+    window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-websocket-event')return;var m=e.data,socket=sockets.get(String(m.socketId));if(!socket)return;if(m.event==='open'){socket.readyState=ProxyWebSocket.OPEN;socket.protocol=m.protocol||'';socket._emit('open',new Event('open'))}else if(m.event==='message'){var data=m.data_type==='binary'?(socket.binaryType==='arraybuffer'?bytes(m.data).buffer:new NativeBlob([bytes(m.data)])):m.data;socket._emit('message',new MessageEvent('message',{data:data}))}else if(m.event==='error'){socket._emit('error',new Event('error'))}else if(m.event==='close'){socket.readyState=ProxyWebSocket.CLOSED;sockets.delete(socket._id);socket._emit('close',new CloseEvent('close',{code:m.code||1006,reason:m.reason||'',wasClean:(m.code||1006)!==1006}))}});
     window.fetch=function(input,init){
       init=init||{};var source=input instanceof NativeRequest?input:null,method=(init.method||(source&&source.method)||'GET').toUpperCase(),url=(source&&source.url)||input,h=headersObject(source&&source.headers);Object.assign(h,headersObject(init.headers));
       var bodyPromise=init.body!==undefined?payload(init.body):(source&&method!=='GET'&&method!=='HEAD'?source.clone().arrayBuffer().then(payload):payload(null));
@@ -123,19 +136,64 @@ function frameHook(basePath){
     ProxyXHR.prototype.open=function(method,url,async){if(async===false)throw Error('同步 XHR 不受支持');this._method=(method||'GET').toUpperCase();this._url=url;this._aborted=false;this.readyState=1;this._emit('readystatechange')};ProxyXHR.prototype.setRequestHeader=function(k,v){this._headers[k]=this._headers[k]?this._headers[k]+', '+v:String(v)};ProxyXHR.prototype.getResponseHeader=function(k){var key=Object.keys(this._responseHeaders).find(function(x){return x.toLowerCase()===String(k).toLowerCase()});return key?this._responseHeaders[key]:null};ProxyXHR.prototype.getAllResponseHeaders=function(){return Object.keys(this._responseHeaders).map(function(k){return k+': '+this._responseHeaders[k]+'\r\n'}).join('')};ProxyXHR.prototype.overrideMimeType=function(){};ProxyXHR.prototype.abort=function(){if(this._aborted)return;this._aborted=true;this.readyState=0;this._emit('abort');this._emit('loadend')};
     ProxyXHR.prototype.send=function(body){var self=this;if(this.readyState!==1)throw Error('XHR 尚未 open');this._emit('loadstart');payload(body).then(function(p){if(p.contentType&&!hasHeader(self._headers,'content-type'))self._headers['content-type']=p.contentType;return ask(self._method,self._url,self._headers,p.bodyBase64,false)}).then(function(r){if(self._aborted)return;self.status=r.status||0;self.statusText=r.status_text||'';self.responseURL=r.response_url||self._url;self._responseHeaders=r.headers||{};self.readyState=2;self._emit('readystatechange');self.readyState=3;self._emit('readystatechange');self.responseText=responseText(r);if(self.responseType==='arraybuffer')self.response=bytes(r.body_base64).buffer;else if(self.responseType==='blob')self.response=new NativeBlob([bytes(r.body_base64)],{type:self.getResponseHeader('content-type')||''});else if(self.responseType==='json'){try{self.response=JSON.parse(self.responseText)}catch(_){self.response=null}}else self.response=self.responseText;self.readyState=4;self._emit('readystatechange');self._emit('load');self._emit('loadend')}).catch(function(){if(self._aborted)return;self.readyState=4;self._emit('readystatechange');self._emit('error');self._emit('loadend')})};
     window.XMLHttpRequest=ProxyXHR;
-    document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(!a||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();e.stopPropagation();parent.postMessage({type:'bifrost-nav',href:toPath(a.getAttribute('href'))},'*')},true);document.addEventListener('auxclick',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a){e.preventDefault();e.stopPropagation()}},true);
+    document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(!a||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();e.stopPropagation();parent.postMessage({type:'bifrost-nav',href:toPath(a.getAttribute('href'),true)},'*')},true);document.addEventListener('auxclick',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a){e.preventDefault();e.stopPropagation()}},true);
+    if(window.navigation)window.navigation.addEventListener('navigate',function(e){if(!e.cancelable||e.hashChange||e.downloadRequest)return;try{var href=toPath(e.destination.url,true);e.preventDefault();parent.postMessage({type:'bifrost-nav',href:href},'*')}catch(_) {}});
     // Application handlers run first; this only emulates an unhandled native submit.
-    window.addEventListener('submit',function(e){var form=e.target,button=e.submitter;if(!form||e.defaultPrevented)return;e.preventDefault();var method=((button&&button.getAttribute('formmethod'))||form.getAttribute('method')||'GET').toUpperCase(),h={},action=(button&&button.getAttribute('formaction'))||form.getAttribute('action')||BASE,enctype=(button&&button.getAttribute('formenctype'))||form.getAttribute('enctype'),fd;try{fd=new NativeFormData(form,button)}catch(_){fd=new NativeFormData(form);if(button&&button.name)fd.append(button.name,button.value)}if(method==='DIALOG')return;if(method==='GET'){var q=new NativeURLSearchParams(fd),u=toPath(action),join=u.indexOf('?')<0?'?':'&';parent.postMessage({type:'bifrost-nav',href:u+(q.toString()?join+q.toString():'')},'*');return}if(method==='HEAD'){ask('HEAD',action,h,'',true).catch(function(){});return}submittedFormPayload(fd,enctype).then(function(p){if(p.contentType)h['content-type']=p.contentType;return ask(method,action,h,p.bodyBase64,true)}).catch(function(){})});
+    window.addEventListener('submit',function(e){var form=e.target,button=e.submitter;if(!form||e.defaultPrevented)return;e.preventDefault();var method=((button&&button.getAttribute('formmethod'))||form.getAttribute('method')||'GET').toUpperCase(),h={},action=(button&&button.getAttribute('formaction'))||form.getAttribute('action')||BASE,enctype=(button&&button.getAttribute('formenctype'))||form.getAttribute('enctype'),fd;try{fd=new NativeFormData(form,button)}catch(_){fd=new NativeFormData(form);if(button&&button.name)fd.append(button.name,button.value)}if(method==='DIALOG')return;if(method==='GET'){var q=new NativeURLSearchParams(fd),u=toPath(action,true),join=u.indexOf('?')<0?'?':'&';parent.postMessage({type:'bifrost-nav',href:u+(q.toString()?join+q.toString():'')},'*');return}if(method==='HEAD'){ask('HEAD',action,h,'',true).catch(function(){});return}submittedFormPayload(fd,enctype).then(function(p){if(p.contentType)h['content-type']=p.contentType;return ask(method,action,h,p.bodyBase64,true)}).catch(function(){})});
     if(window.HTMLFormElement)HTMLFormElement.prototype.submit=function(){this.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))};
     if(navigator.sendBeacon)navigator.sendBeacon=function(url,data){payload(data).then(function(p){return ask('POST',url,p.contentType?{'content-type':p.contentType}:{},p.bodyBase64,false)}).catch(function(){});return true};window.open=function(){return null};
   })();`;
   return '<scr'+'ipt>'+code+'</scr'+'ipt>'
 }
 
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('正在通过 WebRTC 读取内网 '+path);try{render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId+' · 已复用','ok')}catch(e){st('请求失败：'+e.message,'bad')}}
-function render(r){let ct=((Object.entries(r.headers||{}).find(([k])=>k.toLowerCase()==='content-type')||['',''])[1]||'').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64));if(ct.includes('text/html')){let f=document.createElement('iframe');f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=frameHook(currentPath)+text;view.replaceChildren(f)}else{let p=document.createElement('pre');p.textContent=text;view.replaceChildren(p);frame=null}}
 function bytesFor(s){let b=atob(s||''),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
-window.onmessage=async e=>{if(!e.data||!frame||e.source!==frame.contentWindow)return;let source=e.source;if(e.data.type==='bifrost-nav'){let href=e.data.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}if(e.data.type!=='bifrost-request')return;let q=e.data;try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body_base64);if(q.navigate){p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);render(r);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}};
+function headerValue(headers,name){let key=Object.keys(headers||{}).find(value=>value.toLowerCase()===name.toLowerCase());return key?headers[key]:''}
+function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(')}
+async function prepareHtml(text){
+  let doc=new DOMParser().parseFromString(text,'text/html'),created=[];
+  doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath));
+  doc.querySelectorAll('script:not([src])').forEach(node=>{node.textContent=bridgeScript(node.textContent||'')});
+  let assets=[...doc.querySelectorAll('script[src],link[rel~="stylesheet"][href],link[rel~="icon"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
+  await Promise.all(assets.map(async node=>{
+    let attribute=node.hasAttribute('src')?'src':node.hasAttribute('poster')?'poster':'href',value=node.getAttribute(attribute);
+    try{
+      let response=await request('GET',pathFor(value),{accept:'*/*'},'');
+      if(response.status<200||response.status>=300)throw Error('HTTP '+response.status);
+      let type=headerValue(response.headers,'content-type')||((node.tagName==='SCRIPT')?'text/javascript':'application/octet-stream');
+      let content=node.tagName==='SCRIPT'?bridgeScript(new TextDecoder().decode(bytesFor(response.body_base64))):bytesFor(response.body_base64);
+      let objectUrl=URL.createObjectURL(new Blob([content],{type}));
+      created.push(objectUrl);node.setAttribute(attribute,objectUrl);node.removeAttribute('integrity');node.removeAttribute('crossorigin')
+    }catch(error){node.removeAttribute(attribute);warn('subresource proxy failed',{url:value,message:error.message})}
+  }));
+  return {html:'<!doctype html>'+doc.documentElement.outerHTML,urls:created}
+}
+function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(JSON.stringify({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('正在通过 WebRTC 读取内网 '+path);try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId+' · 已复用','ok')}catch(e){st('请求失败：'+e.message,'bad')}}
+async function render(r){
+  let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64)),oldUrls=assetUrls;
+  closeAppSockets();frameSerial++;
+  if(ct.includes('text/html')){let prepared=await prepareHtml(text),f=document.createElement('iframe');assetUrls=prepared.urls;f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=prepared.html;view.replaceChildren(f)}
+  else{let p=document.createElement('pre');p.textContent=text;assetUrls=[];view.replaceChildren(p);frame=null}
+  setTimeout(()=>oldUrls.forEach(url=>URL.revokeObjectURL(url)),0)
+}
+function deliverSocketEvent(message){let entry=appSockets.get(message.socket_id);if(!entry)return;let event={type:'bifrost-websocket-event',socketId:entry.socketId};if(message.type==='websocket_opened'){event.event='open';event.protocol=message.protocol||''}else if(message.type==='websocket_message'){event.event='message';event.data_type=message.data_type;event.data=message.data}else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){event.event='error';entry.source.postMessage(event,'*');event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};appSockets.delete(message.socket_id)}else if(message.type==='websocket_closed'){event.event='close';event.code=message.code||1006;event.reason=message.reason||'';appSockets.delete(message.socket_id)}else return;entry.source.postMessage(event,'*')}
+window.onmessage=async e=>{
+  if(!e.data||!frame||e.source!==frame.contentWindow)return;
+  let source=e.source,q=e.data;
+  if(q.type==='bifrost-nav'){let href=q.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}
+  if(q.type==='bifrost-websocket'){
+    let remoteId=String(frameSerial)+':'+String(q.socketId);
+    try{
+      if(q.action==='open'){let url=new URL(q.url);if(!/^wss?:$/.test(url.protocol))throw Error('unsupported WebSocket URL');appSockets.set(remoteId,{source,socketId:String(q.socketId)});dc.send(JSON.stringify({type:'websocket_open',socket_id:remoteId,path:url.pathname+url.search,protocols:q.protocols||[]}))}
+      else if(q.action==='send'&&appSockets.has(remoteId))dc.send(JSON.stringify({type:'websocket_send',socket_id:remoteId,data_type:q.data_type,data:q.data}))
+      else if(q.action==='close'&&appSockets.has(remoteId))dc.send(JSON.stringify({type:'websocket_close',socket_id:remoteId,code:q.code,reason:q.reason||''}))
+      else throw Error('invalid WebSocket action')
+    }catch(error){appSockets.delete(remoteId);source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'error'},'*');source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'close',code:1006,reason:''},'*')}
+    return
+  }
+  if(q.type!=='bifrost-request')return;
+  try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body_base64);if(q.navigate){p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);await render(r);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
+};
 $('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>navigate(currentPath,false);setAddr(currentPath);
 async function boot(){
   let connectTimer;
@@ -171,7 +229,7 @@ async function boot(){
       }
     };
     dc=pc.createDataChannel('http');
-    dc.onmessage=e=>{let m=JSON.parse(e.data),p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};
+    dc.onmessage=e=>{let m=JSON.parse(e.data);if(String(m.type||'').startsWith('websocket_')){deliverSocketEvent(m);return}let p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};
     dc.onopen=async()=>{debug('data channel open',{label:dc.label,id:dc.id});clearTimeout(connectTimer);connectedAt=Date.now();st('WebRTC 连接已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId,'ok');await dumpPeerStats('data channel open');await navigate(currentPath,false)};
     dc.onclose=()=>debug('data channel closed',{label:dc.label,id:dc.id});
     dc.onerror=event=>warn('data channel error',{type:event.type});

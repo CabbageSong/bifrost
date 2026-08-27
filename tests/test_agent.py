@@ -9,6 +9,48 @@ from aiortc import RTCConfiguration, RTCPeerConnection
 import bifrost.agent as agent
 
 
+def test_dispatch_uses_the_bidirectional_handler_contract():
+    async def scenario():
+        sent = []
+
+        async def reply(message):
+            sent.append(message)
+
+        class Handler:
+            async def __call__(self, message, send):
+                await send({"type": "reply", "id": message["id"]})
+
+        await agent._dispatch('{"id":1}', Handler(), reply)
+        assert sent == [{"type": "reply", "id": 1}]
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_maps_websocket_failures_to_websocket_events():
+    async def scenario():
+        sent = []
+
+        async def reply(message):
+            sent.append(message)
+
+        class Handler:
+            async def __call__(self, _message, _send):
+                raise ValueError("invalid websocket path")
+
+        await agent._dispatch(
+            '{"type":"websocket_open","socket_id":"socket-1"}',
+            Handler(),
+            reply,
+        )
+        assert sent == [{
+            "type": "websocket_open_failed",
+            "socket_id": "socket-1",
+            "error": "invalid websocket path",
+        }]
+
+    asyncio.run(scenario())
+
+
 def test_bind_ice_port_is_task_local():
     async def scenario():
         probes = []

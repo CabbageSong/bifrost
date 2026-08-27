@@ -5,7 +5,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from bifrost.client import configured_services, proxy_http
+from bifrost.client import ServiceProxy, configured_services
 from bifrost.protocol import decode_body, encode_body
 
 
@@ -31,6 +31,17 @@ def config(services):
         },
         'services': complete_services,
     }
+
+
+async def proxy_request(proxy, message):
+    replies = []
+
+    async def reply(response):
+        replies.append(response)
+
+    await proxy(message, reply)
+    assert len(replies) == 1
+    return replies[0]
 
 
 def test_empty_password_hash_means_public_room():
@@ -82,7 +93,7 @@ def test_service_rejects_invalid_host_or_scheme():
         ("OPTIONS", b""),
     ],
 )
-def test_proxy_http_forwards_common_methods(method, body):
+def test_service_proxy_forwards_common_http_methods(method, body):
     async def scenario():
         async def resource(request):
             received = await request.read()
@@ -97,7 +108,9 @@ def test_proxy_http_forwards_common_methods(method, body):
         await server.start_server()
         try:
             async with aiohttp.ClientSession() as session:
-                response = await proxy_http(
+                proxy = ServiceProxy(str(server.make_url("/")), session)
+                response = await proxy_request(
+                    proxy,
                     {
                         "type": "http_request",
                         "id": method,
@@ -106,8 +119,6 @@ def test_proxy_http_forwards_common_methods(method, body):
                         "headers": {"x-forwarded-test": "yes"},
                         "body_base64": encode_body(body),
                     },
-                    str(server.make_url("/")),
-                    session,
                 )
         finally:
             await server.close()
@@ -121,7 +132,7 @@ def test_proxy_http_forwards_common_methods(method, body):
     asyncio.run(scenario())
 
 
-def test_proxy_http_reuses_cookies_and_reports_redirect_url():
+def test_service_proxy_reuses_cookies_and_reports_redirect_url():
     async def scenario():
         async def login(request):
             response = web.HTTPFound("/account")
@@ -140,7 +151,9 @@ def test_proxy_http_reuses_cookies_and_reports_redirect_url():
 
         try:
             async with aiohttp.ClientSession(cookie_jar=jar) as session:
-                login = await proxy_http(
+                proxy = ServiceProxy(str(server.make_url("/")), session)
+                login = await proxy_request(
+                    proxy,
                     {
                         "type": "http_request",
                         "id": "login",
@@ -149,10 +162,9 @@ def test_proxy_http_reuses_cookies_and_reports_redirect_url():
                         "headers": {},
                         "body_base64": "",
                     },
-                    str(server.make_url("/")),
-                    session,
                 )
-                account = await proxy_http(
+                account = await proxy_request(
+                    proxy,
                     {
                         "type": "http_request",
                         "id": "account",
@@ -161,8 +173,6 @@ def test_proxy_http_reuses_cookies_and_reports_redirect_url():
                         "headers": {},
                         "body_base64": "",
                     },
-                    str(server.make_url("/")),
-                    session,
                 )
         finally:
             await server.close()
@@ -170,6 +180,132 @@ def test_proxy_http_reuses_cookies_and_reports_redirect_url():
         assert login["response_url"] == "/account"
         assert decode_body(login["body_base64"]) == b"active"
         assert decode_body(account["body_base64"]) == b"active"
+
+    asyncio.run(scenario())
+
+
+def test_service_proxy_relays_local_websocket_messages():
+    async def scenario():
+        async def websocket_handler(request):
+            assert request.headers["Origin"] == str(server.make_url("/")).rstrip("/")
+            websocket = web.WebSocketResponse(protocols=("bifrost-test",))
+            await websocket.prepare(request)
+            async for message in websocket:
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    await websocket.send_str("echo:" + message.data)
+                elif message.type == aiohttp.WSMsgType.BINARY:
+                    await websocket.send_bytes(message.data[::-1])
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/events", websocket_handler)
+        server = TestServer(app)
+        await server.start_server()
+        replies = []
+        received = asyncio.Event()
+
+        async def reply(message):
+            replies.append(message)
+            if message["type"] in {"websocket_message", "websocket_closed"}:
+                received.set()
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                proxy = ServiceProxy(str(server.make_url("/")), session)
+                with pytest.raises(ValueError, match="websocket path"):
+                    await proxy(
+                        {
+                            "type": "websocket_open",
+                            "socket_id": "unsafe",
+                            "path": "//other-host/events",
+                        },
+                        reply,
+                    )
+                with pytest.raises(ValueError, match="websocket protocols"):
+                    await proxy(
+                        {
+                            "type": "websocket_open",
+                            "socket_id": "bad-protocol",
+                            "path": "/events",
+                            "protocols": ["has spaces"],
+                        },
+                        reply,
+                    )
+                await proxy(
+                    {
+                        "type": "websocket_open",
+                        "socket_id": "socket-1",
+                        "path": "/events?after=2",
+                        "protocols": ["bifrost-test"],
+                    },
+                    reply,
+                )
+                assert replies.pop(0) == {
+                    "type": "websocket_opened",
+                    "socket_id": "socket-1",
+                    "protocol": "bifrost-test",
+                }
+                await proxy(
+                    {
+                        "type": "websocket_send",
+                        "socket_id": "socket-1",
+                        "data_type": "text",
+                        "data": "hello",
+                    },
+                    reply,
+                )
+                await asyncio.wait_for(received.wait(), timeout=1)
+                assert replies[0] == {
+                    "type": "websocket_message",
+                    "socket_id": "socket-1",
+                    "data_type": "text",
+                    "data": "echo:hello",
+                }
+                received.clear()
+                await proxy(
+                    {
+                        "type": "websocket_send",
+                        "socket_id": "socket-1",
+                        "data_type": "binary",
+                        "data": encode_body(b"abc"),
+                    },
+                    reply,
+                )
+                await asyncio.wait_for(received.wait(), timeout=1)
+                assert replies[-1] == {
+                    "type": "websocket_message",
+                    "socket_id": "socket-1",
+                    "data_type": "binary",
+                    "data": encode_body(b"cba"),
+                }
+                received.clear()
+                await proxy(
+                    {
+                        "type": "websocket_close",
+                        "socket_id": "socket-1",
+                        "code": 1000,
+                        "reason": "done",
+                    },
+                    reply,
+                )
+                await asyncio.wait_for(received.wait(), timeout=1)
+                assert replies[-1]["type"] == "websocket_closed"
+                assert proxy.websockets == {}
+
+                received.clear()
+                await proxy(
+                    {
+                        "type": "websocket_open",
+                        "socket_id": "socket-2",
+                        "path": "/events",
+                    },
+                    reply,
+                )
+                assert replies.pop()["type"] == "websocket_opened"
+                await proxy.close_connection(reply)
+                assert proxy.websockets == {}
+        finally:
+            await server.close()
 
     asyncio.run(scenario())
 

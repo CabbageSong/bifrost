@@ -41,6 +41,22 @@ def test_static_page_bridges_http_methods_and_browser_apis():
     assert "allow-same-origin" not in text
 
 
+def test_static_page_bridges_subresources_navigation_and_websockets():
+    text = files("bifrost").joinpath("static/index.html").read_text(encoding="utf-8")
+    assert "async function prepareHtml" in text
+    assert "script[src]" in text
+    assert "img[src]" in text
+    assert "URL.createObjectURL" in text
+    assert "doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath))" in text
+    assert "f.srcdoc=prepared.html" in text
+    assert "window.WebSocket=ProxyWebSocket" in text
+    assert "type:'websocket_open'" in text
+    assert "type:'websocket_send'" in text
+    assert "type:'websocket_close'" in text
+    assert "window.__bifrostNavigate" in text
+    assert "location\\s*\\." in text
+
+
 def test_static_page_logs_ice_diagnostics_without_turn_secrets():
     text = files("bifrost").joinpath("static/index.html").read_text(encoding="utf-8")
     assert "onicecandidateerror" in text

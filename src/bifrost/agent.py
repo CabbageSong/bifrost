@@ -7,9 +7,9 @@ import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Protocol
 
 import aiohttp
 from aiortc import (
@@ -33,7 +33,19 @@ from .protocol import (
 )
 
 log = logging.getLogger("bifrost.agent")
-MessageHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
+MessageSender = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+class MessageHandler(Protocol):
+    async def __call__(
+        self,
+        message: dict[str, Any],
+        reply: MessageSender,
+    ) -> None: ...
+
+    async def close_connection(self, reply: MessageSender) -> None: ...
+
+
 _ice_port = ContextVar("bifrost_ice_port", default=None)
 _LOOP_PATCH_MARKER = "_bifrost_original_create_datagram_endpoint"
 
@@ -131,18 +143,31 @@ def load_identity(auth):
     return private_key, private_key.public_key()
 
 
-async def _dispatch(channel, raw, handler: MessageHandler):
+async def _dispatch(raw, handler: MessageHandler, reply: MessageSender):
+    message = None
     request_id = None
     try:
         message = json.loads(raw)
         request_id = message.get("id")
-        result = await handler(message)
-        if result is not None and channel.readyState == "open":
-            channel.send(json.dumps(result))
+        await handler(message, reply)
     except Exception as exc:
         log.exception("request forwarding failed")
-        if channel.readyState == "open":
-            channel.send(json.dumps(http_response(request_id, 502, {}, "", error=str(exc))))
+        if isinstance(message, dict) and str(message.get("type", "")).startswith(
+            "websocket_"
+        ):
+            response = {
+                "type": (
+                    "websocket_open_failed"
+                    if message.get("type") == "websocket_open"
+                    else "websocket_error"
+                ),
+                "socket_id": message.get("socket_id"),
+                "error": str(exc),
+            }
+        else:
+            response = http_response(request_id, 502, {}, "", error=str(exc))
+        with suppress(ConnectionError):
+            await reply(response)
 
 
 async def run_agent(cfg, handler: MessageHandler, identity=None):
@@ -234,9 +259,21 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                 def channel(ch):
                     log.info("datachannel=%s", ch.label)
 
+                    async def reply(result):
+                        if ch.readyState != "open":
+                            raise ConnectionError("data channel is closed")
+                        try:
+                            ch.send(json.dumps(result))
+                        except Exception as exc:
+                            raise ConnectionError("data channel send failed") from exc
+
                     @ch.on("message")
                     def message(raw):
-                        asyncio.create_task(_dispatch(ch, raw, handler))
+                        asyncio.create_task(_dispatch(raw, handler, reply))
+
+                    @ch.on("close")
+                    def closed():
+                        asyncio.create_task(handler.close_connection(reply))
 
                 return pc
 
