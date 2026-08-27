@@ -44,9 +44,10 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "async function prepareHtml" in text
     assert "script[src]" in text
     assert "img[src]" in text
-    assert "URL.createObjectURL" in text
+    assert "'data:'+type.split(';',1)[0]+';base64,'+body" in text
+    assert "URL.createObjectURL" not in text
     assert "doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath))" in text
-    assert "f.srcdoc=prepared.html" in text
+    assert "f.srcdoc=prepared" in text
     assert "window.WebSocket=ProxyWebSocket" in text
     assert "type:'websocket_open'" in text
     assert "type:'websocket_send'" in text

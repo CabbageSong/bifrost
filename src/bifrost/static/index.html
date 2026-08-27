@@ -18,7 +18,7 @@ html,body{margin:0;height:100%;font:14px system-ui}
 <main id="view"></main>
 <script>
 const bifrostConfig = /* BIFROST_CONFIG */;
-let shellUrl=new URL(location.href),room=bifrostConfig.room||shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null,frameSerial=0,appSockets=new Map(),assetUrls=[];
+let shellUrl=new URL(location.href),room=bifrostConfig.room||shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null,frameSerial=0,appSockets=new Map();
 shellUrl.searchParams.delete('room');
 let currentPath=bifrostConfig.path||shellUrl.pathname+shellUrl.search,connectedAt=null,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;
 const $=x=>document.getElementById(x);
@@ -137,10 +137,11 @@ function frameHook(basePath){
 }
 
 function bytesFor(s){let b=atob(s||''),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
+function base64ForBytes(a){let s='';for(let i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)}
 function headerValue(headers,name){let key=Object.keys(headers||{}).find(value=>value.toLowerCase()===name.toLowerCase());return key?headers[key]:''}
 function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(')}
 async function prepareHtml(text){
-  let doc=new DOMParser().parseFromString(text,'text/html'),created=[];
+  let doc=new DOMParser().parseFromString(text,'text/html');
   doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath));
   doc.querySelectorAll('script:not([src])').forEach(node=>{node.textContent=bridgeScript(node.textContent||'')});
   let assets=[...doc.querySelectorAll('script[src],link[rel~="stylesheet"][href],link[rel~="icon"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
@@ -150,21 +151,21 @@ async function prepareHtml(text){
       let response=await request('GET',pathFor(value),{accept:'*/*'},'');
       if(response.status<200||response.status>=300)throw Error('HTTP '+response.status);
       let type=headerValue(response.headers,'content-type')||((node.tagName==='SCRIPT')?'text/javascript':'application/octet-stream');
-      let content=node.tagName==='SCRIPT'?bridgeScript(new TextDecoder().decode(bytesFor(response.body_base64))):bytesFor(response.body_base64);
-      let objectUrl=URL.createObjectURL(new Blob([content],{type}));
-      created.push(objectUrl);node.setAttribute(attribute,objectUrl);node.removeAttribute('integrity');node.removeAttribute('crossorigin')
+      let body=response.body_base64;
+      if(node.tagName==='SCRIPT')body=base64ForBytes(new TextEncoder().encode(bridgeScript(new TextDecoder().decode(bytesFor(body)))));
+      // Blob URLs belong to the parent origin and are blocked by the opaque sandbox.
+      node.setAttribute(attribute,'data:'+type.split(';',1)[0]+';base64,'+body);node.removeAttribute('integrity');node.removeAttribute('crossorigin')
     }catch(error){node.removeAttribute(attribute);warn('subresource proxy failed',{url:value,message:error.message})}
   }));
-  return {html:'<!doctype html>'+doc.documentElement.outerHTML,urls:created}
+  return '<!doctype html>'+doc.documentElement.outerHTML
 }
 function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(JSON.stringify({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
 async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('正在通过 WebRTC 读取内网 '+path);try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId+' · 已复用','ok')}catch(e){st('请求失败：'+e.message,'bad')}}
 async function render(r){
-  let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64)),oldUrls=assetUrls;
+  let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64));
   closeAppSockets();frameSerial++;
-  if(ct.includes('text/html')){let prepared=await prepareHtml(text),f=document.createElement('iframe');assetUrls=prepared.urls;f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=prepared.html;view.replaceChildren(f)}
-  else{let p=document.createElement('pre');p.textContent=text;assetUrls=[];view.replaceChildren(p);frame=null}
-  setTimeout(()=>oldUrls.forEach(url=>URL.revokeObjectURL(url)),0)
+  if(ct.includes('text/html')){let prepared=await prepareHtml(text),f=document.createElement('iframe');f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=prepared;view.replaceChildren(f)}
+  else{let p=document.createElement('pre');p.textContent=text;view.replaceChildren(p);frame=null}
 }
 function deliverSocketEvent(message){let entry=appSockets.get(message.socket_id);if(!entry)return;let event={type:'bifrost-websocket-event',socketId:entry.socketId};if(message.type==='websocket_opened'){event.event='open';event.protocol=message.protocol||''}else if(message.type==='websocket_message'){event.event='message';event.data_type=message.data_type;event.data=message.data}else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){event.event='error';entry.source.postMessage(event,'*');event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};appSockets.delete(message.socket_id)}else if(message.type==='websocket_closed'){event.event='close';event.code=message.code||1006;event.reason=message.reason||'';appSockets.delete(message.socket_id)}else return;entry.source.postMessage(event,'*')}
 function failTransport(){for(let [id,p] of pending){p.no(Error('WebRTC 数据通道已断开'))}pending.clear();for(let entry of appSockets.values()){entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'error'},'*');entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''},'*')}appSockets.clear()}
