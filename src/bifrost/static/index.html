@@ -3,26 +3,42 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Bifrost</title>
 <style>
-html,body{margin:0;height:100%;font:14px system-ui}
-#nav{height:50px;display:flex;gap:6px;align-items:center;padding:8px;box-sizing:border-box;background:#fff;border-bottom:1px solid #ddd}
-#nav button{height:32px}
-#addr{flex:1;height:30px;border:1px solid #bbb;border-radius:16px;padding:0 12px;font-family:monospace}
-#status{height:32px;padding:8px 12px;box-sizing:border-box;background:#f6f7f9;border-bottom:1px solid #ddd;color:#555}
-.ok{color:#187a3d}.bad{color:#b22}
-#view{height:calc(100% - 82px);overflow:auto}
-#view iframe{border:0;width:100%;height:100%;min-height:calc(100vh - 82px)}
+html,body{margin:0;height:100%;overflow:hidden;font:14px system-ui}
+body{display:flex;flex-direction:column;background:#fff;color:#202124}
+#nav{min-height:52px;display:flex;gap:8px;align-items:center;padding:8px 10px;box-sizing:border-box;background:#fff;border-bottom:1px solid #dfe1e5;box-shadow:0 1px 3px rgb(60 64 67 / 10%);flex:0 0 auto}
+#history{display:flex;gap:4px;flex:0 0 auto}
+#nav button{height:34px;border:1px solid #c7cbd1;border-radius:6px;background:#fff;color:#3c4043;font:inherit;cursor:pointer}
+#nav button:hover{background:#f5f6f7;border-color:#aeb4bc}
+#nav button:active{background:#e9ebee}
+#nav button:focus-visible,#addr:focus-visible{outline:2px solid #1a73e8;outline-offset:1px}
+.nav-button{width:34px;padding:0;font-size:20px;line-height:1}
+#go{padding:0 14px;font-weight:600}
+#addr{min-width:80px;flex:1;height:34px;box-sizing:border-box;border:1px solid #bdc1c6;border-radius:6px;padding:0 11px;background:#f8f9fa;color:#202124;font:13px ui-monospace,SFMono-Regular,Consolas,monospace}
+#addr:hover{background:#fff;border-color:#9aa0a6}
+#addr:focus{background:#fff;border-color:#1a73e8}
+#status{min-width:0;max-width:240px;display:flex;align-items:center;gap:7px;padding-left:12px;box-sizing:border-box;border-left:1px solid #e1e3e6;color:#5f6368;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 0 auto}
+#status::before{content:'';width:7px;height:7px;border-radius:50%;background:#9aa0a6;flex:0 0 auto}
+#status.ok{color:#137333}
+#status.ok::before{background:#188038}
+#status.bad{color:#b3261e}
+#status.bad::before{background:#d93025}
+#view{min-height:0;overflow:auto;flex:1 1 auto}
+#view iframe{display:block;border:0;width:100%;height:100%}
 #view pre{margin:0;padding:20px;white-space:pre-wrap}
+@media(max-width:520px){
+  #nav{gap:4px;flex-wrap:wrap;padding:6px}
+  #status{order:2;width:100%;max-width:none;height:18px;justify-content:flex-end;padding:0 3px;border:0;font-size:12px}
+}
 </style>
-<div id="nav"><button id="back">‹</button><button id="forward">›</button><button id="refresh">↻</button><input id="addr"><button id="go">访问</button></div>
-<div id="status">正在建立 WebRTC 直连...</div>
+<nav id="nav" aria-label="浏览导航"><div id="history"><button id="back" class="nav-button" type="button" title="后退" aria-label="后退">‹</button><button id="forward" class="nav-button" type="button" title="前进" aria-label="前进">›</button><button id="refresh" class="nav-button" type="button" title="刷新" aria-label="刷新">↻</button></div><input id="addr" aria-label="访问路径" spellcheck="false"><button id="go" type="button">访问</button><span id="status" role="status" aria-live="polite">连接中</span></nav>
 <main id="view"></main>
 <script>
 const bifrostConfig = /* BIFROST_CONFIG */;
 let shellUrl=new URL(location.href),room=bifrostConfig.room||shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null,frameSerial=0,appSockets=new Map();
 shellUrl.searchParams.delete('room');
-let currentPath=bifrostConfig.path||shellUrl.pathname+shellUrl.search,connectedAt=null,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;
+let currentPath=bifrostConfig.path||shellUrl.pathname+shellUrl.search,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;
 const $=x=>document.getElementById(x);
-function st(x,c=''){ $('status').textContent=x;$('status').className=c }
+function st(x,c='',detail=''){let status=$('status');status.textContent=x;status.className=c;status.title=detail}
 function setAddr(p){$('addr').value=p}
 function send(x){if(ws&&ws.readyState===1)ws.send(JSON.stringify(x))}
 function debug(event,details){let prefix='[Bifrost '+connectionId+']';if(details===undefined)console.info(prefix,event);else console.info(prefix,event,details)}
@@ -160,7 +176,7 @@ async function prepareHtml(text){
   return '<!doctype html>'+doc.documentElement.outerHTML
 }
 function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(JSON.stringify({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('正在通过 WebRTC 读取内网 '+path);try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));st('WebRTC 直连已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId+' · 已复用','ok')}catch(e){st('请求失败：'+e.message,'bad')}}
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('加载中');try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));st('已连接 · '+connectionId,'ok')}catch(e){st('请求失败','bad',e.message)}}
 async function render(r){
   let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64));
   closeAppSockets();frameSerial++;
@@ -191,13 +207,13 @@ async function boot(){
   let connectTimer;
   try{
     if(!room)throw Error('访问地址缺少 room 参数');
-    st('正在连接信令服务器...');
+    st('连接中');
     let wsScheme=location.protocol==='https:'?'wss://':'ws://';
     ws=new WebSocket(wsScheme+location.host+'/signal?role=client&room='+encodeURIComponent(room));
     await new Promise((ok,no)=>{ws.onopen=ok;ws.onerror=no});
     debug('signaling websocket open',{url:ws.url,room});
     ws.onerror=event=>warn('signaling websocket error',{type:event.type});
-    ws.onclose=event=>{debug('signaling websocket closed',{code:event.code,reason:event.reason,wasClean:event.wasClean});clearTimeout(connectTimer);if(pc)pc.close();st(bifrostConfig.protected?'登录会话已结束，请刷新页面重新登录。':'信令连接已关闭，请刷新页面重试。','bad')};
+    ws.onclose=event=>{debug('signaling websocket closed',{code:event.code,reason:event.reason,wasClean:event.wasClean});clearTimeout(connectTimer);if(pc)pc.close();st(bifrostConfig.protected?'会话已结束':'连接已关闭','bad',bifrostConfig.protected?'请刷新页面重新登录。':'请刷新页面重试。')};
     let iceServers=bifrostConfig.iceServers;
     let hasTurn=iceServers.some(server=>(Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>/^turns?:/.test(url)));
     let iceError=()=>hasTurn?'WebRTC ICE 连接失败，请检查 TURN 地址、凭据和防火墙。':'WebRTC ICE 连接失败，当前网络无法打洞，需要 TURN 中继。';
@@ -207,8 +223,8 @@ async function boot(){
     pc.onicecandidateerror=event=>warn('ICE candidate error',{url:event.url,address:event.address,port:event.port,errorCode:event.errorCode,errorText:event.errorText});
     pc.onicegatheringstatechange=()=>{debug('ICE gathering state',{state:pc.iceGatheringState});if(pc.iceGatheringState==='complete')debug('local description candidates',sdpCandidates(pc.localDescription))};
     pc.onsignalingstatechange=()=>debug('signaling state',{state:pc.signalingState});
-    pc.oniceconnectionstatechange=()=>{debug('ICE connection state',{state:pc.iceConnectionState});if(pc.iceConnectionState==='failed'){clearTimeout(connectTimer);st(iceError(),'bad');dumpPeerStats('ICE failed')}else if(pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed')dumpPeerStats('ICE '+pc.iceConnectionState)};
-    pc.onconnectionstatechange=()=>{debug('peer connection state',{state:pc.connectionState});if(pc.connectionState==='failed'){clearTimeout(connectTimer);st(iceError(),'bad')}};
+    pc.oniceconnectionstatechange=()=>{debug('ICE connection state',{state:pc.iceConnectionState});if(pc.iceConnectionState==='failed'){clearTimeout(connectTimer);st('连接失败','bad',iceError());dumpPeerStats('ICE failed')}else if(pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed')dumpPeerStats('ICE '+pc.iceConnectionState)};
+    pc.onconnectionstatechange=()=>{debug('peer connection state',{state:pc.connectionState});if(pc.connectionState==='failed'){clearTimeout(connectTimer);st('连接失败','bad',iceError())}};
     ws.onmessage=async event=>{
       let message=JSON.parse(event.data);debug('signaling message received',{type:message.type});
       if(message.type==='answer'){
@@ -222,10 +238,10 @@ async function boot(){
     };
     dc=pc.createDataChannel('http');
     dc.onmessage=e=>{let m=JSON.parse(e.data);if(String(m.type||'').startsWith('websocket_')){deliverSocketEvent(m);return}let p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};
-    dc.onopen=async()=>{debug('data channel open',{label:dc.label,id:dc.id});clearTimeout(connectTimer);connectedAt=Date.now();st('WebRTC 连接已建立 · '+new Date(connectedAt).toLocaleString()+' · 连接 '+connectionId,'ok');await dumpPeerStats('data channel open');await navigate(currentPath,false)};
-    dc.onclose=()=>{debug('data channel closed',{label:dc.label,id:dc.id});failTransport()};
+    dc.onopen=async()=>{debug('data channel open',{label:dc.label,id:dc.id});clearTimeout(connectTimer);st('已连接 · '+connectionId,'ok');await dumpPeerStats('data channel open');await navigate(currentPath,false)};
+    dc.onclose=()=>{debug('data channel closed',{label:dc.label,id:dc.id});failTransport();if(ws&&ws.readyState===1)st('连接已断开','bad')};
     dc.onerror=event=>warn('data channel error',{type:event.type});
-    connectTimer=setTimeout(()=>{if(!dc||dc.readyState!=='open'){st(hasTurn?'WebRTC ICE 连接超时，请检查 TURN 服务是否可达。':'WebRTC ICE 连接超时，当前网络可能需要 TURN 中继。','bad');dumpPeerStats('20 second connect timeout')}},20000);
+    connectTimer=setTimeout(()=>{if(!dc||dc.readyState!=='open'){st('连接超时','bad',hasTurn?'请检查 TURN 服务是否可达。':'当前网络可能需要 TURN 中继。');dumpPeerStats('20 second connect timeout')}},20000);
     let o=await pc.createOffer();
     debug('local offer created',{type:o.type});
     await pc.setLocalDescription(o);
@@ -234,7 +250,7 @@ async function boot(){
   }catch(e){
     warn('boot failed',{name:e.name,message:e.message,stack:e.stack});
     clearTimeout(connectTimer);
-    st('WebRTC 连接失败：'+e.message,'bad');
+    st('连接失败','bad',e.message);
     view.innerHTML='<pre>连接失败，请确认 Bifrost client 正在运行。</pre>'
   }
 }boot();
