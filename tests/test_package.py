@@ -65,3 +65,16 @@ def test_static_page_logs_ice_diagnostics_without_turn_secrets():
     assert "pc.getStats()" in text
     assert "unhandledrejection" in text
     assert "credential:server.credential?'configured':undefined" in text
+
+
+def test_static_page_reconnects_web_rtc_transport():
+    text = files("bifrost").joinpath("static/index.html").read_text(encoding="utf-8")
+    assert "function scheduleReconnect" in text
+    assert "function reconnectNow" in text
+    assert "function teardownTransport" in text
+    assert "ICE disconnected for 5 seconds" in text
+    assert "Math.min(1000*2**Math.min(reconnectAttempt,4),16000)" in text
+    assert "window.addEventListener('online'" in text
+    assert "document.addEventListener('visibilitychange'" in text
+    assert "$('refresh').onclick=()=>{if(dc&&dc.readyState==='open')" in text
+    assert "bifrostConfig.protected&&event.code===1008" in text

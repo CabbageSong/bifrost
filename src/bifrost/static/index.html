@@ -35,6 +35,7 @@ body{display:flex;flex-direction:column;background:#fff;color:#202124}
 <script>
 const bifrostConfig = /* BIFROST_CONFIG */;
 let shellUrl=new URL(location.href),room=bifrostConfig.room||shellUrl.searchParams.get('room'),ws,pc,dc,seq=0,pending=new Map(),frame=null,frameSerial=0,appSockets=new Map();
+let transportGeneration=0,connecting=false,reconnectTimer=null,connectTimer=null,disconnectTimer=null,reconnectAttempt=0,sessionEnded=false;
 shellUrl.searchParams.delete('room');
 let currentPath=bifrostConfig.path||shellUrl.pathname+shellUrl.search,connectionId=Math.random().toString(36).slice(2),historyPaths=[currentPath],historyIndex=0;
 const $=x=>document.getElementById(x);
@@ -176,7 +177,7 @@ async function prepareHtml(text){
   return '<!doctype html>'+doc.documentElement.outerHTML
 }
 function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(JSON.stringify({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);st('加载中');try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));st('已连接 · '+connectionId,'ok')}catch(e){st('请求失败','bad',e.message)}}
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));if(dc&&dc.readyState==='open')st('已连接 · '+connectionId,'ok')}catch(e){if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
 async function render(r){
   let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64));
   closeAppSockets();frameSerial++;
@@ -202,56 +203,94 @@ window.onmessage=async e=>{
   if(q.type!=='bifrost-request')return;
   try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body_base64);if(q.navigate){p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);await render(r);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
 };
-$('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>navigate(currentPath,false);setAddr(currentPath);
-async function boot(){
-  let connectTimer;
+$('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>{if(dc&&dc.readyState==='open')navigate(currentPath,false);else reconnectNow('refresh requested')};setAddr(currentPath);
+function teardownTransport(generation){
+  if(generation!==transportGeneration)return;
+  transportGeneration++;connecting=false;clearTimeout(connectTimer);clearTimeout(disconnectTimer);connectTimer=null;disconnectTimer=null;
+  let oldWs=ws,oldPc=pc;ws=null;pc=null;dc=null;failTransport();
+  if(oldWs&&oldWs.readyState<2)oldWs.close();
+  if(oldPc&&oldPc.signalingState!=='closed')oldPc.close()
+}
+function scheduleReconnect(reason,immediate=false){
+  if(sessionEnded||!room||(dc&&dc.readyState==='open')||connecting)return;
+  if(reconnectTimer){if(!immediate)return;clearTimeout(reconnectTimer);reconnectTimer=null}
+  let delay=immediate?0:Math.min(1000*2**Math.min(reconnectAttempt,4),16000);reconnectAttempt++;
+  debug('reconnect scheduled',{reason,delay,attempt:reconnectAttempt});
+  st(delay?'连接已断开 · '+Math.ceil(delay/1000)+' 秒后重连':'正在重连','bad',reason);
+  reconnectTimer=setTimeout(()=>{reconnectTimer=null;connect()},delay)
+}
+function transportLost(reason,generation){
+  if(generation!==transportGeneration||sessionEnded)return;
+  debug('transport lost',{reason});teardownTransport(generation);scheduleReconnect(reason)
+}
+function reconnectNow(reason){
+  if(sessionEnded){st('会话已结束','bad','请刷新页面重新登录。');return}
+  if(dc&&dc.readyState==='open'){navigate(currentPath,false);return}
+  if(connecting)teardownTransport(transportGeneration);
+  scheduleReconnect(reason,true)
+}
+async function connect(){
+  if(connecting||sessionEnded||(dc&&dc.readyState==='open'))return;
+  if(!room){st('连接失败','bad','访问地址缺少 room 参数');return}
+  let generation=++transportGeneration,localWs,localPc,localDc,opened=false;
+  connecting=true;st(reconnectAttempt?'正在重连 · 第 '+reconnectAttempt+' 次':'连接中');
   try{
-    if(!room)throw Error('访问地址缺少 room 参数');
-    st('连接中');
     let wsScheme=location.protocol==='https:'?'wss://':'ws://';
-    ws=new WebSocket(wsScheme+location.host+'/signal?role=client&room='+encodeURIComponent(room));
-    await new Promise((ok,no)=>{ws.onopen=ok;ws.onerror=no});
-    debug('signaling websocket open',{url:ws.url,room});
-    ws.onerror=event=>warn('signaling websocket error',{type:event.type});
-    ws.onclose=event=>{debug('signaling websocket closed',{code:event.code,reason:event.reason,wasClean:event.wasClean});clearTimeout(connectTimer);if(pc)pc.close();st(bifrostConfig.protected?'会话已结束':'连接已关闭','bad',bifrostConfig.protected?'请刷新页面重新登录。':'请刷新页面重试。')};
+    localWs=new WebSocket(wsScheme+location.host+'/signal?role=client&room='+encodeURIComponent(room));ws=localWs;
+    await new Promise((ok,no)=>{
+      localWs.onopen=()=>{opened=true;ok()};
+      localWs.onerror=event=>{warn('signaling websocket error',{type:event.type});if(!opened)no(Error('信令服务器连接失败'))};
+      localWs.onclose=event=>{
+        debug('signaling websocket closed',{code:event.code,reason:event.reason,wasClean:event.wasClean});
+        if(!opened)no(Error(event.reason||'信令服务器连接已关闭'));
+        if(generation!==transportGeneration)return;
+        if(bifrostConfig.protected&&event.code===1008){sessionEnded=true;teardownTransport(generation);st('会话已结束','bad','请刷新页面重新登录。');return}
+        transportLost('signaling websocket closed',generation)
+      }
+    });
+    if(generation!==transportGeneration)return;
+    debug('signaling websocket open',{url:localWs.url,room});
     let iceServers=bifrostConfig.iceServers;
     let hasTurn=iceServers.some(server=>(Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>/^turns?:/.test(url)));
     let iceError=()=>hasTurn?'WebRTC ICE 连接失败，请检查 TURN 地址、凭据和防火墙。':'WebRTC ICE 连接失败，当前网络无法打洞，需要 TURN 中继。';
     debug('creating peer connection',{iceServers:safeIceServers(iceServers),hasTurn});
-    pc=new RTCPeerConnection({iceServers});
-    pc.onicecandidate=event=>{if(event.candidate){debug('local ICE candidate',candidateDetails(event.candidate));send({type:'candidate',candidate:event.candidate.toJSON()})}else debug('local ICE candidates complete',sdpCandidates(pc.localDescription))};
-    pc.onicecandidateerror=event=>warn('ICE candidate error',{url:event.url,address:event.address,port:event.port,errorCode:event.errorCode,errorText:event.errorText});
-    pc.onicegatheringstatechange=()=>{debug('ICE gathering state',{state:pc.iceGatheringState});if(pc.iceGatheringState==='complete')debug('local description candidates',sdpCandidates(pc.localDescription))};
-    pc.onsignalingstatechange=()=>debug('signaling state',{state:pc.signalingState});
-    pc.oniceconnectionstatechange=()=>{debug('ICE connection state',{state:pc.iceConnectionState});if(pc.iceConnectionState==='failed'){clearTimeout(connectTimer);st('连接失败','bad',iceError());dumpPeerStats('ICE failed')}else if(pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed')dumpPeerStats('ICE '+pc.iceConnectionState)};
-    pc.onconnectionstatechange=()=>{debug('peer connection state',{state:pc.connectionState});if(pc.connectionState==='failed'){clearTimeout(connectTimer);st('连接失败','bad',iceError())}};
-    ws.onmessage=async event=>{
-      let message=JSON.parse(event.data);debug('signaling message received',{type:message.type});
-      if(message.type==='answer'){
-        debug('remote answer candidates',sdpCandidates(message.sdp));
-        await pc.setRemoteDescription(message.sdp);
-        debug('remote answer applied',{signalingState:pc.signalingState})
-      }else if(message.type==='candidate'&&message.candidate){
-        debug('remote trickle ICE candidate',candidateDetails(message.candidate));
-        try{await pc.addIceCandidate(message.candidate)}catch(error){warn('remote ICE candidate rejected',{candidate:candidateDetails(message.candidate),message:error.message})}
-      }
+    localPc=new RTCPeerConnection({iceServers});pc=localPc;
+    localPc.onicecandidate=event=>{if(generation!==transportGeneration)return;if(event.candidate){debug('local ICE candidate',candidateDetails(event.candidate));send({type:'candidate',candidate:event.candidate.toJSON()})}else debug('local ICE candidates complete',sdpCandidates(localPc.localDescription))};
+    localPc.onicecandidateerror=event=>warn('ICE candidate error',{url:event.url,address:event.address,port:event.port,errorCode:event.errorCode,errorText:event.errorText});
+    localPc.onicegatheringstatechange=()=>{if(generation!==transportGeneration)return;debug('ICE gathering state',{state:localPc.iceGatheringState});if(localPc.iceGatheringState==='complete')debug('local description candidates',sdpCandidates(localPc.localDescription))};
+    localPc.onsignalingstatechange=()=>{if(generation===transportGeneration)debug('signaling state',{state:localPc.signalingState})};
+    localPc.oniceconnectionstatechange=()=>{
+      if(generation!==transportGeneration)return;let state=localPc.iceConnectionState;debug('ICE connection state',{state});
+      if(state==='disconnected'){clearTimeout(disconnectTimer);st('网络波动 · 正在恢复');disconnectTimer=setTimeout(()=>{if(generation===transportGeneration&&localPc.iceConnectionState==='disconnected')transportLost('ICE disconnected for 5 seconds',generation)},5000)}
+      else{clearTimeout(disconnectTimer);disconnectTimer=null;if(state==='failed'){dumpPeerStats('ICE failed');transportLost(iceError(),generation)}else if(state==='connected'||state==='completed'){if(localDc&&localDc.readyState==='open')st('已连接 · '+connectionId,'ok');dumpPeerStats('ICE '+state)}}
     };
-    dc=pc.createDataChannel('http');
-    dc.onmessage=e=>{let m=JSON.parse(e.data);if(String(m.type||'').startsWith('websocket_')){deliverSocketEvent(m);return}let p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};
-    dc.onopen=async()=>{debug('data channel open',{label:dc.label,id:dc.id});clearTimeout(connectTimer);st('已连接 · '+connectionId,'ok');await dumpPeerStats('data channel open');await navigate(currentPath,false)};
-    dc.onclose=()=>{debug('data channel closed',{label:dc.label,id:dc.id});failTransport();if(ws&&ws.readyState===1)st('连接已断开','bad')};
-    dc.onerror=event=>warn('data channel error',{type:event.type});
-    connectTimer=setTimeout(()=>{if(!dc||dc.readyState!=='open'){st('连接超时','bad',hasTurn?'请检查 TURN 服务是否可达。':'当前网络可能需要 TURN 中继。');dumpPeerStats('20 second connect timeout')}},20000);
-    let o=await pc.createOffer();
-    debug('local offer created',{type:o.type});
-    await pc.setLocalDescription(o);
-    debug('local offer applied',{signalingState:pc.signalingState,candidates:sdpCandidates(pc.localDescription)});
-    send({type:'offer',sdp:pc.localDescription})
+    localPc.onconnectionstatechange=()=>{if(generation!==transportGeneration)return;let state=localPc.connectionState;debug('peer connection state',{state});if(state==='failed')transportLost(iceError(),generation)};
+    localWs.onmessage=async event=>{
+      if(generation!==transportGeneration)return;
+      try{
+        let message=JSON.parse(event.data);debug('signaling message received',{type:message.type});
+        if(message.type==='answer'){
+          debug('remote answer candidates',sdpCandidates(message.sdp));await localPc.setRemoteDescription(message.sdp);debug('remote answer applied',{signalingState:localPc.signalingState})
+        }else if(message.type==='candidate'&&message.candidate){
+          debug('remote trickle ICE candidate',candidateDetails(message.candidate));try{await localPc.addIceCandidate(message.candidate)}catch(error){warn('remote ICE candidate rejected',{candidate:candidateDetails(message.candidate),message:error.message})}
+        }
+      }catch(error){warn('signaling message failed',{message:error.message})}
+    };
+    localDc=localPc.createDataChannel('http');dc=localDc;
+    localDc.onmessage=e=>{if(generation!==transportGeneration)return;let m=JSON.parse(e.data);if(String(m.type||'').startsWith('websocket_')){deliverSocketEvent(m);return}let p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};
+    localDc.onopen=async()=>{if(generation!==transportGeneration)return;debug('data channel open',{label:localDc.label,id:localDc.id});connecting=false;reconnectAttempt=0;clearTimeout(connectTimer);connectTimer=null;st('已连接 · '+connectionId,'ok');await dumpPeerStats('data channel open');if(generation===transportGeneration)await navigate(currentPath,false)};
+    localDc.onclose=()=>{debug('data channel closed',{label:localDc.label,id:localDc.id});transportLost('data channel closed',generation)};
+    localDc.onerror=event=>warn('data channel error',{type:event.type});
+    connectTimer=setTimeout(()=>{if(generation===transportGeneration&&localDc.readyState!=='open'){dumpPeerStats('20 second connect timeout');transportLost(hasTurn?'TURN 连接超时':'WebRTC 连接超时',generation)}},20000);
+    let o=await localPc.createOffer();debug('local offer created',{type:o.type});await localPc.setLocalDescription(o);
+    if(generation!==transportGeneration)return;
+    debug('local offer applied',{signalingState:localPc.signalingState,candidates:sdpCandidates(localPc.localDescription)});send({type:'offer',sdp:localPc.localDescription})
   }catch(e){
-    warn('boot failed',{name:e.name,message:e.message,stack:e.stack});
-    clearTimeout(connectTimer);
-    st('连接失败','bad',e.message);
-    view.innerHTML='<pre>连接失败，请确认 Bifrost client 正在运行。</pre>'
+    warn('connect failed',{name:e.name,message:e.message,stack:e.stack});
+    if(generation===transportGeneration){teardownTransport(generation);scheduleReconnect(e.message||'connection failed')}
   }
-}boot();
+}
+window.addEventListener('online',()=>reconnectNow('network online'));
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&(!dc||dc.readyState!=='open'))reconnectNow('page visible')});
+connect();
 </script>
