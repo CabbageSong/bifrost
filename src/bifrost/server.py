@@ -39,6 +39,12 @@ from .room_auth import (
 )
 
 log = logging.getLogger("bifrost.server")
+# Keep TERM shutdown bounded.  aiohttp's default is 60 seconds, which is
+# longer than common service-manager stop timeouts and leaves a server with a
+# live WebSocket waiting until it is force-killed.  This must be positive:
+# aiohttp treats a zero shutdown timeout as no timeout on some supported
+# versions.
+SHUTDOWN_TIMEOUT = 0.1
 rooms = {}
 AUTHORIZED_KEYS = web.AppKey("authorized_keys", dict)
 AUTH_TIMEOUT = web.AppKey("auth_timeout", float)
@@ -621,6 +627,7 @@ def main():
         host=cfg["server"]["bind"],
         port=cfg["server"]["port"],
         ssl_context=context,
+        shutdown_timeout=SHUTDOWN_TIMEOUT,
     )
 
 
