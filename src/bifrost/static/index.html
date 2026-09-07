@@ -91,7 +91,7 @@ function pathFor(value){
 function frameHook(basePath){
   const code=String.raw`(function(){
     var BASE=${JSON.stringify(basePath)},calls=new Map(),next=0;
-    var NativeRequest=window.Request,NativeResponse=window.Response;
+    var NativeRequest=window.Request,NativeResponse=window.Response,NativeFetch=window.fetch;
     var NativeURLSearchParams=window.URLSearchParams,NativeFormData=window.FormData,NativeBlob=window.Blob;
     function b64(buf){var a=new Uint8Array(buf),s='';for(var i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)}
     function bytes(s){var b=atob(s||''),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
@@ -128,6 +128,7 @@ function frameHook(basePath){
       return formPayload(fd)
     }
     function responseFrom(r){var status=r.status||200,data=bytes(r.body_base64);if(status===204||status===205||status===304)data=null;var response=new NativeResponse(data,{status:status,statusText:r.status_text||'',headers:r.headers||{}});if(r.response_url)Object.defineProperty(response,'url',{value:r.response_url});return response}
+    function downloadLocal(value,filename){NativeFetch(value).then(function(response){if(!response.ok)throw Error('HTTP '+response.status);return response.arrayBuffer().then(function(buffer){parent.postMessage({type:'bifrost-download-data',data:b64(buffer),contentType:response.headers.get('content-type')||'',filename:filename||''},'*')})}).catch(function(error){parent.postMessage({type:'bifrost-download-error',error:error.message||String(error)},'*')})}
     window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-response')return;var p=calls.get(e.data.requestId);if(!p)return;calls.delete(e.data.requestId);if(e.data.error)p.reject(Error(e.data.error));else p.resolve(e.data.response||{})});
     window.__bifrostNavigate=function(value){parent.postMessage({type:'bifrost-nav',href:toPath(value,true)},'*')};
     var socketNext=0,sockets=new Map();
@@ -146,7 +147,7 @@ function frameHook(basePath){
       var bodyPromise=init.body!==undefined?payload(init.body):(source&&method!=='GET'&&method!=='HEAD'?source.clone().arrayBuffer().then(payload):payload(null));
       return bodyPromise.then(function(p){if(p.contentType&&!hasHeader(h,'content-type'))h['content-type']=p.contentType;return ask(method,url,h,p.bodyBase64,false)}).then(responseFrom)
     };
-    document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(!a||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();e.stopPropagation();parent.postMessage({type:'bifrost-nav',href:toPath(a.getAttribute('href'),true)},'*')},true);document.addEventListener('auxclick',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a){e.preventDefault();e.stopPropagation()}},true);
+    document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(!a||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();e.stopPropagation();if(a.hasAttribute('download')){var href=a.getAttribute('href')||'';if(/^(?:blob|data):/i.test(href)){downloadLocal(href,a.getAttribute('download')||'');return}parent.postMessage({type:'bifrost-download',href:toPath(href,true),filename:a.getAttribute('download')||''},'*');return}parent.postMessage({type:'bifrost-nav',href:toPath(a.getAttribute('href'),true)},'*')},true);document.addEventListener('auxclick',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a){e.preventDefault();e.stopPropagation()}},true);
     // Application handlers run first; this only emulates an unhandled native submit.
     window.addEventListener('submit',function(e){var form=e.target,button=e.submitter;if(!form||e.defaultPrevented)return;e.preventDefault();var method=((button&&button.getAttribute('formmethod'))||form.getAttribute('method')||'GET').toUpperCase(),h={},action=(button&&button.getAttribute('formaction'))||form.getAttribute('action')||BASE,enctype=(button&&button.getAttribute('formenctype'))||form.getAttribute('enctype'),fd;try{fd=new NativeFormData(form,button)}catch(_){fd=new NativeFormData(form);if(button&&button.name)fd.append(button.name,button.value)}if(method==='DIALOG')return;if(method==='GET'){var q=new NativeURLSearchParams(fd),u=toPath(action,true),join=u.indexOf('?')<0?'?':'&';parent.postMessage({type:'bifrost-nav',href:u+(q.toString()?join+q.toString():'')},'*');return}if(method==='HEAD'){ask('HEAD',action,h,'',true).catch(function(){});return}submittedFormPayload(fd,enctype).then(function(p){if(p.contentType)h['content-type']=p.contentType;return ask(method,action,h,p.bodyBase64,true)}).catch(function(){})});
   })();`;
@@ -156,6 +157,12 @@ function frameHook(basePath){
 function bytesFor(s){let b=atob(s||''),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
 function base64ForBytes(a){let s='';for(let i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)}
 function headerValue(headers,name){let key=Object.keys(headers||{}).find(value=>value.toLowerCase()===name.toLowerCase());return key?headers[key]:''}
+function safeDownloadName(value){return String(value||'').replace(/[\u0000-\u001f\u007f]/g,'').replace(/[\\/:*?"<>|]/g,'_').trim().slice(0,255)||'download'}
+function dispositionFilename(value){let match=String(value||'').match(/(?:^|;)\s*filename\*\s*=\s*(?:UTF-8''|utf-8'')?([^;]*)/i);if(match){let name=match[1].trim().replace(/^"|"$/g,'');try{name=decodeURIComponent(name)}catch(_){}return name}match=String(value||'').match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]*))/i);return match?(match[1]||match[2]).trim():''}
+function downloadName(response,requested,path){let fromHeader=dispositionFilename(headerValue(response.headers,'content-disposition'));if(fromHeader)return safeDownloadName(fromHeader);if(requested)return safeDownloadName(requested);let value=(path||'').split('?',1)[0].split('/').pop();try{value=decodeURIComponent(value)}catch(_){}return safeDownloadName(value)}
+function hasDownloadDisposition(response){return /(?:^|;)\s*attachment(?:\s*;|$)/i.test(headerValue(response.headers,'content-disposition'))}
+function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([bytesFor(response.body_base64)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
+function isDownloadResponse(response,requested=''){let status=Number(response.status||0);return status>=200&&status<300&& (!!requested||hasDownloadDisposition(response))}
 function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(')}
 async function prepareHtml(text){
   let doc=new DOMParser().parseFromString(text,'text/html');
@@ -177,12 +184,14 @@ async function prepareHtml(text){
   return '<!doctype html>'+doc.documentElement.outerHTML
 }
 function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(JSON.stringify({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));if(dc&&dc.readyState==='open')st('已连接 · '+connectionId,'ok')}catch(e){if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
-async function render(r){
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{let downloaded=await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));if(dc&&dc.readyState==='open')st(downloaded?'下载已开始':'已连接 · '+connectionId,'ok')}catch(e){if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
+async function render(r,requested=''){
+  if(isDownloadResponse(r,requested)){triggerDownload(r,requested,r.response_url||currentPath);return true}
   let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64));
   closeAppSockets();frameSerial++;
   if(ct.includes('text/html')){let prepared=await prepareHtml(text),f=document.createElement('iframe');f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=prepared;view.replaceChildren(f)}
   else{let p=document.createElement('pre');p.textContent=text;view.replaceChildren(p);frame=null}
+  return false
 }
 function deliverSocketEvent(message){let entry=appSockets.get(message.socket_id);if(!entry)return;let event={type:'bifrost-websocket-event',socketId:entry.socketId};if(message.type==='websocket_opened'){event.event='open';event.protocol=message.protocol||''}else if(message.type==='websocket_message'){event.event='message';event.data_type=message.data_type;event.data=message.data}else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){event.event='error';entry.source.postMessage(event,'*');event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};appSockets.delete(message.socket_id)}else if(message.type==='websocket_closed'){event.event='close';event.code=message.code||1006;event.reason=message.reason||'';appSockets.delete(message.socket_id)}else return;entry.source.postMessage(event,'*')}
 function failTransport(){for(let [id,p] of pending){p.no(Error('WebRTC 数据通道已断开'))}pending.clear();for(let entry of appSockets.values()){entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'error'},'*');entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''},'*')}appSockets.clear()}
@@ -190,6 +199,9 @@ window.onmessage=async e=>{
   if(!e.data||!frame||e.source!==frame.contentWindow)return;
   let source=e.source,q=e.data;
   if(q.type==='bifrost-nav'){let href=q.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}
+  if(q.type==='bifrost-download-data'){try{triggerDownload({headers:{'content-type':q.contentType||''},body_base64:q.data||''},q.filename||'','');st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
+  if(q.type==='bifrost-download-error'){st('下载失败','bad',q.error||'无法读取下载内容');return}
+  if(q.type==='bifrost-download'){try{let p=pathFor(q.href||'/'),r=await request('GET',p,{accept:'*/*'},'');if(r.status<200||r.status>=300){await render(r);st('下载失败','bad','HTTP '+r.status);return}triggerDownload(r,q.filename||'',p);st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
   if(q.type==='bifrost-websocket'){
     let remoteId=String(frameSerial)+':'+String(q.socketId);
     try{
@@ -201,7 +213,7 @@ window.onmessage=async e=>{
     return
   }
   if(q.type!=='bifrost-request')return;
-  try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body_base64);if(q.navigate){p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);await render(r);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
+  try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body_base64);if(q.navigate){if(await render(r))return;p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
 };
 $('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>{if(dc&&dc.readyState==='open')navigate(currentPath,false);else reconnectNow('refresh requested')};setAddr(currentPath);
 function teardownTransport(generation){

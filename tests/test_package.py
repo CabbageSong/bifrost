@@ -45,7 +45,6 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "script[src]" in text
     assert "img[src]" in text
     assert "'data:'+type.split(';',1)[0]+';base64,'+body" in text
-    assert "URL.createObjectURL" not in text
     assert "doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath))" in text
     assert "f.srcdoc=prepared" in text
     assert "window.WebSocket=ProxyWebSocket" in text
@@ -54,6 +53,16 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "type:'websocket_close'" in text
     assert "window.__bifrostNavigate" in text
     assert "location\\s*\\." in text
+
+
+def test_static_page_bridges_browser_downloads():
+    text = files("bifrost").joinpath("static/index.html").read_text(encoding="utf-8")
+    assert "type:'bifrost-download'" in text
+    assert "function triggerDownload" in text
+    assert "Content-Disposition" in text
+    assert "URL.createObjectURL(blob)" in text
+    assert "type:'bifrost-download-data'" in text
+    assert "NativeFetch=window.fetch" in text
 
 
 def test_static_page_logs_ice_diagnostics_without_turn_secrets():
