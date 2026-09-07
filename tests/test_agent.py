@@ -4,9 +4,13 @@ import socket
 
 import aiohttp
 import pytest
-from aiortc import RTCConfiguration, RTCPeerConnection
+from aiohttp.test_utils import TestClient, TestServer
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import bifrost.agent as agent
+from bifrost.auth import public_key_text
+from bifrost.server import create_app, rooms
 
 
 def test_dispatch_uses_the_bidirectional_handler_contract():
@@ -83,6 +87,31 @@ def test_bind_ice_port_is_task_local():
     asyncio.run(scenario())
 
 
+def test_bind_ice_port_allows_multiple_peers_to_share_a_room_port():
+    async def scenario():
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        async def bind():
+            with agent.bind_ice_port(port):
+                return await asyncio.get_running_loop().create_datagram_endpoint(
+                    asyncio.DatagramProtocol,
+                    local_addr=("127.0.0.1", 0),
+                )
+
+        first, second = await asyncio.gather(bind(), bind())
+        try:
+            assert first[0].get_extra_info("sockname")[1] == port
+            assert second[0].get_extra_info("sockname")[1] == port
+        finally:
+            first[0].close()
+            second[0].close()
+
+    asyncio.run(scenario())
+
+
 def test_answer_uses_fixed_ice_host_candidate_port():
     async def scenario():
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -107,6 +136,110 @@ def test_answer_uses_fixed_ice_host_candidate_port():
         finally:
             await browser.close()
             await local_agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_agent_handles_two_browser_peers_on_one_room_port():
+    async def scenario():
+        rooms.clear()
+        private_key = Ed25519PrivateKey.generate()
+        cfg = {
+            "server": {"bind": "127.0.0.1", "port": 8443},
+            "webrtc": {"ice_servers": []},
+            "tls": {"cert": "", "key": ""},
+            "auth": {
+                "public_keys": [public_key_text(private_key.public_key())],
+                "timeout": 2,
+            },
+            "browser_auth": {
+                "session_ttl": 300,
+                "max_attempts": 5,
+                "attempt_window": 60,
+                "password_workers": 1,
+            },
+        }
+
+        class Handler:
+            async def __call__(self, _message, _reply):
+                pass
+
+            async def close_connection(self, _reply):
+                pass
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        ice_port = probe.getsockname()[1]
+        probe.close()
+
+        async with TestClient(TestServer(create_app(cfg))) as client:
+            agent_cfg = {
+                "signal": {
+                    "url": str(client.make_url("/signal")),
+                    "room": "home",
+                    "verify_tls": True,
+                },
+                "auth": {"timeout": 2},
+                "browser_auth": {"password_hash": ""},
+                "webrtc": {"ice_servers": [], "ice_port": ice_port},
+            }
+            agent_task = asyncio.create_task(
+                agent.run_agent(
+                    agent_cfg,
+                    Handler(),
+                    identity=(private_key, private_key.public_key()),
+                )
+            )
+            browsers = []
+            try:
+                for _ in range(100):
+                    if rooms.get("home", {}).get("agent"):
+                        break
+                    await asyncio.sleep(0.01)
+                assert rooms.get("home", {}).get("agent")
+
+                opened = []
+                for _ in range(2):
+                    websocket = await client.ws_connect(
+                        "/signal?role=client&room=home"
+                    )
+                    assert await websocket.receive_json() == {"type": "agent_online"}
+                    peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+                    channel = peer.createDataChannel("http")
+                    channel_opened = asyncio.Event()
+                    channel.on("open", channel_opened.set)
+                    opened.append(channel_opened)
+                    await peer.setLocalDescription(await peer.createOffer())
+                    await websocket.send_json({
+                        "type": "offer",
+                        "sdp": {
+                            "type": peer.localDescription.type,
+                            "sdp": peer.localDescription.sdp,
+                        },
+                    })
+                    while True:
+                        message = await websocket.receive_json()
+                        if message["type"] == "answer":
+                            await peer.setRemoteDescription(
+                                RTCSessionDescription(**message["sdp"])
+                            )
+                            break
+                    browsers.append((websocket, peer))
+
+                await asyncio.wait_for(
+                    asyncio.gather(*(event.wait() for event in opened)),
+                    timeout=10,
+                )
+                assert len(rooms["home"]["clients"]) == 2
+            finally:
+                for websocket, peer in browsers:
+                    await websocket.close()
+                    await peer.close()
+                if not agent_task.done():
+                    agent_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await agent_task
+        rooms.clear()
 
     asyncio.run(scenario())
 

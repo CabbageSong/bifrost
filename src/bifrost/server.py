@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import ssl
 import time
 from collections import defaultdict, deque
@@ -381,10 +382,10 @@ async def _expire_client_session(ws, expires):
         await ws.close(code=1008, message=b"room session expired")
 
 
-async def _tell_agent_client_offline(state):
+async def _tell_agent_client_offline(state, client_id):
     agent = state.get("agent")
     if agent and not agent.closed:
-        await agent.send_json({"type": "client_offline"})
+        await agent.send_json({"type": "client_offline", "client_id": client_id})
 
 
 async def signal(request):
@@ -437,19 +438,17 @@ async def signal(request):
         if state is None:
             state = {
                 "agent": ws,
-                "clients": set(),
-                "client": None,
+                "clients": {},
                 "password_hash": password_hash,
             }
             rooms[room] = state
         else:
             state["agent"] = ws
             state["password_hash"] = password_hash
-            for old in list(state["clients"]):
+            for old in list(state["clients"].values()):
                 if not old.closed:
                     await old.close(code=1012, message=b"agent reconnected")
             state["clients"].clear()
-            state["client"] = None
         log.info("agent connected room=%s key=%s", room, identity.fingerprint)
     else:
         if (
@@ -458,15 +457,8 @@ async def signal(request):
         ):
             await ws.close(code=1013, message=b"room changed during connection")
             return ws
-        old = state.get("client")
-        state["client"] = None
-        if old:
-            state["clients"].discard(old)
-            if not old.closed:
-                await old.close(code=1012, message=b"replaced")
-            await _tell_agent_client_offline(state)
-        state["clients"].add(ws)
-        state["client"] = ws
+        client_id = secrets.token_urlsafe(12)
+        state["clients"][client_id] = ws
         log.info("client connected room=%s", room)
         await ws.send_json({"type": "agent_online"})
         if session_expires is not None:
@@ -482,7 +474,18 @@ async def signal(request):
                 data = json.loads(msg.data)
             except ValueError:
                 continue
-            target = state["agent"] if role == "client" else state.get("client")
+            if role == "client":
+                if not isinstance(data, dict):
+                    continue
+                target = state["agent"]
+                data = dict(data)
+                data["client_id"] = client_id
+            else:
+                if not isinstance(data, dict):
+                    continue
+                target = state["clients"].get(data.get("client_id"))
+                data = dict(data)
+                data.pop("client_id", None)
             if target and not target.closed:
                 await target.send_json(data)
     finally:
@@ -490,14 +493,16 @@ async def signal(request):
             expiry_task.cancel()
         if role == "agent" and state.get("agent") is ws:
             state["agent"] = None
-            for browser in list(state["clients"]):
+            for browser in list(state["clients"].values()):
                 if not browser.closed:
                     await browser.close(code=1012, message=b"agent disconnected")
-        was_active_client = role == "client" and state.get("client") is ws
+            state["clients"].clear()
+        was_active_client = (
+            role == "client" and state["clients"].get(client_id) is ws
+        )
         if was_active_client:
-            state["client"] = None
-            await _tell_agent_client_offline(state)
-        state["clients"].discard(ws)
+            state["clients"].pop(client_id, None)
+            await _tell_agent_client_offline(state, client_id)
         if not state.get("agent") and not state["clients"] and rooms.get(room) is state:
             rooms.pop(room)
         log.info("%s disconnected room=%s", role, room)

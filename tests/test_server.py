@@ -209,10 +209,10 @@ def test_agent_registers_room_before_browser_can_join():
 
             assert await browser.receive_json() == {"type": "agent_online"}
             await browser.send_json({"type": "offer", "sdp": {"type": "offer"}})
-            assert await agent.receive_json() == {
-                "type": "offer",
-                "sdp": {"type": "offer"},
-            }
+            forwarded_offer = await agent.receive_json()
+            assert forwarded_offer["type"] == "offer"
+            assert forwarded_offer["sdp"] == {"type": "offer"}
+            assert forwarded_offer["client_id"]
 
             await browser.close()
             await agent.close()
@@ -315,7 +315,62 @@ def test_room_portal_and_protected_room_login():
             )
             assert await browser.receive_json() == {"type": "agent_online"}
             await browser.close()
-            assert await agent.receive_json() == {"type": "client_offline"}
+            offline = await agent.receive_json()
+            assert offline["type"] == "client_offline"
+            assert offline["client_id"]
+            await agent.close()
+        rooms.clear()
+
+    asyncio.run(scenario())
+
+
+def test_multiple_browser_clients_are_routed_independently():
+    async def scenario():
+        rooms.clear()
+        private_key = Ed25519PrivateKey.generate()
+        app = create_app(server_config([public_key_text(private_key.public_key())]))
+        async with TestClient(TestServer(app)) as client:
+            agent = await authenticate_agent(client, private_key, "home")
+            first = await client.ws_connect("/signal?role=client&room=home")
+            second = await client.ws_connect("/signal?role=client&room=home")
+            assert await first.receive_json() == {"type": "agent_online"}
+            assert await second.receive_json() == {"type": "agent_online"}
+
+            await first.send_json({"type": "offer", "window": 1})
+            await second.send_json({"type": "offer", "window": 2})
+            first_offer = await agent.receive_json()
+            second_offer = await agent.receive_json()
+            assert {first_offer["window"], second_offer["window"]} == {1, 2}
+            assert first_offer["client_id"] != second_offer["client_id"]
+
+            await agent.send_json({
+                "type": "answer",
+                "window": first_offer["window"],
+                "client_id": first_offer["client_id"],
+            })
+            await agent.send_json({
+                "type": "answer",
+                "window": second_offer["window"],
+                "client_id": second_offer["client_id"],
+            })
+            assert await first.receive_json() == {"type": "answer", "window": 1}
+            assert await second.receive_json() == {"type": "answer", "window": 2}
+
+            await first.close()
+            offline = await agent.receive_json()
+            assert offline == {
+                "type": "client_offline",
+                "client_id": first_offer["client_id"],
+            }
+
+            await second.send_json({"type": "candidate", "window": 2})
+            assert await agent.receive_json() == {
+                "type": "candidate",
+                "window": 2,
+                "client_id": second_offer["client_id"],
+            }
+
+            await second.close()
             await agent.close()
         rooms.clear()
 

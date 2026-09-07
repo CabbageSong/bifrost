@@ -61,6 +61,8 @@ def _install_ice_port_binding(loop):
         local_addr = kwargs.get("local_addr")
         if port is not None and local_addr and local_addr[1] == 0:
             kwargs["local_addr"] = (local_addr[0], port, *local_addr[2:])
+            # A room exposes one UDP port, so multiple browser peers must share it.
+            kwargs["reuse_port"] = True
         return await original(protocol_factory, *args, **kwargs)
 
     setattr(loop, _LOOP_PATCH_MARKER, original)
@@ -208,50 +210,69 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                 has_turn,
                 ice_port,
             )
-            pc = None
-            pending = []
+            peers = {}
 
-            async def send(message):
+            async def send(message, client_id=None):
                 if not sig.closed:
+                    if client_id is not None:
+                        message = dict(message)
+                        message["client_id"] = client_id
                     await sig.send_json(message)
 
-            async def new_pc():
-                nonlocal pc
-                if pc:
+            async def close_peer(peer):
+                pc = peer.get("pc")
+                peer["pc"] = None
+                if pc and pc.signalingState != "closed":
                     await pc.close()
+
+            async def new_pc(client_id):
+                old = peers.pop(client_id, None)
+                pending = []
+                if old:
+                    if old.get("pc") is None:
+                        pending = old["pending"]
+                    await close_peer(old)
                 pc = RTCPeerConnection(configuration)
+                peer = {"pc": pc, "pending": pending}
+                peers[client_id] = peer
 
                 @pc.on("icecandidate")
                 async def ice(candidate):
                     if candidate:
-                        await send({
-                            "type": "candidate",
-                            "candidate": {
-                                "candidate": "candidate:" + candidate_to_sdp(candidate),
-                                "sdpMid": candidate.sdpMid,
-                                "sdpMLineIndex": candidate.sdpMLineIndex,
+                        await send(
+                            {
+                                "type": "candidate",
+                                "candidate": {
+                                    "candidate": "candidate:" + candidate_to_sdp(candidate),
+                                    "sdpMid": candidate.sdpMid,
+                                    "sdpMLineIndex": candidate.sdpMLineIndex,
+                                },
                             },
-                        })
+                            client_id,
+                        )
 
                 @pc.on("connectionstatechange")
                 async def state():
                     log.info(
-                        "peer state=%s ice=%s",
+                        "peer state=%s ice=%s client=%s",
                         pc.connectionState,
                         pc.iceConnectionState,
+                        client_id,
                     )
 
                 @pc.on("iceconnectionstatechange")
                 async def ice_state():
                     log.info(
-                        "peer ice=%s state=%s",
+                        "peer ice=%s state=%s client=%s",
                         pc.iceConnectionState,
                         pc.connectionState,
+                        client_id,
                     )
                     if pc.iceConnectionState == "failed":
                         log.warning(
-                            "ICE connectivity failed room=%s turn_configured=%s",
+                            "ICE connectivity failed room=%s client=%s turn_configured=%s",
                             signal["room"],
+                            client_id,
                             has_turn,
                         )
 
@@ -275,50 +296,66 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                     def closed():
                         asyncio.create_task(handler.close_connection(reply))
 
-                return pc
+                return peer
 
-            async for msg in sig:
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                message = json.loads(msg.data)
-                if message.get("type") == "offer":
-                    pc = await new_pc()
-                    await pc.setRemoteDescription(RTCSessionDescription(**message["sdp"]))
-                    for candidate in pending:
-                        try:
+            try:
+                async for msg in sig:
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    message = json.loads(msg.data)
+                    client_id = message.get("client_id", "legacy")
+                    if not isinstance(client_id, str) or not client_id:
+                        log.warning("ignoring signal without a valid client_id")
+                        continue
+                    if message.get("type") == "offer":
+                        peer = await new_pc(client_id)
+                        pc = peer["pc"]
+                        await pc.setRemoteDescription(
+                            RTCSessionDescription(**message["sdp"])
+                        )
+                        for candidate in peer["pending"]:
+                            try:
+                                await pc.addIceCandidate(candidate)
+                            except Exception:
+                                pass
+                        peer["pending"] = []
+                        answer = await pc.createAnswer()
+                        with bind_ice_port(ice_port):
+                            await pc.setLocalDescription(answer)
+                        _check_ice_port(pc, ice_port, signal["room"])
+                        await send(
+                            {
+                                "type": "answer",
+                                "sdp": {
+                                    "sdp": pc.localDescription.sdp,
+                                    "type": pc.localDescription.type,
+                                },
+                            },
+                            client_id,
+                        )
+                    elif message.get("type") == "candidate" and message.get("candidate"):
+                        value = message["candidate"]
+                        candidate = candidate_from_sdp(
+                            value["candidate"].removeprefix("candidate:")
+                        )
+                        candidate.sdpMid = value.get("sdpMid")
+                        candidate.sdpMLineIndex = value.get("sdpMLineIndex")
+                        peer = peers.setdefault(
+                            client_id, {"pc": None, "pending": []}
+                        )
+                        pc = peer["pc"]
+                        if pc and pc.remoteDescription:
                             await pc.addIceCandidate(candidate)
-                        except Exception:
-                            pass
-                    pending = []
-                    answer = await pc.createAnswer()
-                    with bind_ice_port(ice_port):
-                        await pc.setLocalDescription(answer)
-                    _check_ice_port(pc, ice_port, signal["room"])
-                    await send({
-                        "type": "answer",
-                        "sdp": {
-                            "sdp": pc.localDescription.sdp,
-                            "type": pc.localDescription.type,
-                        },
-                    })
-                elif message.get("type") == "candidate" and message.get("candidate"):
-                    value = message["candidate"]
-                    candidate = candidate_from_sdp(
-                        value["candidate"].removeprefix("candidate:")
-                    )
-                    candidate.sdpMid = value.get("sdpMid")
-                    candidate.sdpMLineIndex = value.get("sdpMLineIndex")
-                    if pc and pc.remoteDescription:
-                        await pc.addIceCandidate(candidate)
-                    else:
-                        pending.append(candidate)
-                elif message.get("type") == "client_offline":
-                    pending = []
-                    if pc:
-                        await pc.close()
-                        pc = None
-            if pc:
-                await pc.close()
+                        else:
+                            peer["pending"].append(candidate)
+                    elif message.get("type") == "client_offline":
+                        peer = peers.pop(client_id, None)
+                        if peer:
+                            await close_peer(peer)
+            finally:
+                for peer in list(peers.values()):
+                    await close_peer(peer)
+                peers.clear()
 
 
 async def serve_agent(

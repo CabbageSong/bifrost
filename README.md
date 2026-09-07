@@ -30,6 +30,7 @@ python3 -m bifrost.client
 server 默认按 `[tls]` 配置使用 HTTPS/WSS。如果 `tls.cert` 和 `tls.key` 同时配置为空字符串，server 会改用 HTTP/WS；两者只能同时为空或同时非空。纯 HTTP 不会加密密码、Cookie 或业务流量，只适合可信内网、反向代理已在前面终止 TLS 的部署，或临时调试环境。
 
 内网 client 会使用 `config/client.toml` 中的 `[[services]]` 注册一个或多个 room。client 启动后，可以在 `https://<server>:8443/` 输入 room 名称，也可以直接打开 `https://<server>:8443/<room>`；未注册的 room 会被 server 拒绝。`/<room>/some/path?x=1` 这样的深链接会在登录成功后回到原地址。
+同一个 room 支持多个浏览器窗口同时访问；每个窗口都会建立独立的 WebRTC peer connection。
 
 ## ICE、STUN 与 TURN 配置
 
