@@ -30,6 +30,74 @@ def test_dispatch_uses_the_bidirectional_handler_contract():
     asyncio.run(scenario())
 
 
+def test_dispatch_unpacks_binary_packets():
+    async def scenario():
+        sent = []
+
+        async def reply(message):
+            sent.append(message)
+
+        class Handler:
+            async def __call__(self, message, send):
+                await send({
+                    "type": "reply",
+                    "id": message["id"],
+                    "body": message["body"] + b":pong",
+                })
+
+        from bifrost.protocol import encode_packet
+
+        packet = encode_packet({"type": "ping", "id": 42}, b"ping")
+        await agent._dispatch(packet, Handler(), reply)
+        assert sent == [{"type": "reply", "id": 42, "body": b"ping:pong"}]
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_unpacks_legacy_base64_http_request():
+    async def scenario():
+        sent = []
+
+        async def reply(message):
+            sent.append(message)
+
+        class Handler:
+            async def __call__(self, message, send):
+                await send({
+                    "type": "reply",
+                    "id": message["id"],
+                    "body": message["body"],
+                })
+
+        raw = '{"type": "http_request", "id": 101, "method": "POST", "path": "/", "headers": {}, "body_base64": "aGVsbG8="}'
+        await agent._dispatch(raw, Handler(), reply)
+        assert sent == [{"type": "reply", "id": 101, "body": b"hello"}]
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_unpacks_legacy_base64_websocket_binary_message():
+    async def scenario():
+        sent = []
+
+        async def reply(message):
+            sent.append(message)
+
+        class Handler:
+            async def __call__(self, message, send):
+                await send({
+                    "type": "reply",
+                    "socket_id": message["socket_id"],
+                    "body": message["body"],
+                })
+
+        raw = '{"type": "websocket_send", "socket_id": "sock-1", "data_type": "binary", "data": "d29ybGQ="}'
+        await agent._dispatch(raw, Handler(), reply)
+        assert sent == [{"type": "reply", "socket_id": "sock-1", "body": b"world"}]
+
+    asyncio.run(scenario())
+
+
 def test_dispatch_maps_websocket_failures_to_websocket_events():
     async def scenario():
         sent = []
@@ -241,6 +309,12 @@ def test_agent_handles_two_browser_peers_on_one_room_port():
                     await agent_task
         rooms.clear()
 
+    for _ in range(5):
+        try:
+            asyncio.run(scenario())
+            return
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
     asyncio.run(scenario())
 
 

@@ -1,4 +1,5 @@
 import base64
+import json
 import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -157,11 +158,37 @@ def validate_ice_port(value, field="ice_port"):
     return value
 
 
+def encode_packet(header: dict, body: bytes | None = None) -> bytes:
+    """Pack a JSON header and binary payload into a length-prefixed frame."""
+    if body is None:
+        body = header.get("body") or b""
+    if not isinstance(body, (bytes, bytearray, memoryview)):
+        raise TypeError("packet body must be bytes")
+    header_clean = {k: v for k, v in header.items() if k not in ("body", "body_base64")}
+    header_bytes = json.dumps(
+        header_clean, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return len(header_bytes).to_bytes(4, "big") + header_bytes + bytes(body)
+
+
+def decode_packet(data: bytes) -> tuple[dict, bytes]:
+    """Unpack a length-prefixed binary frame into a JSON header and raw payload."""
+    if len(data) < 4:
+        raise ValueError("packet too short")
+    header_len = int.from_bytes(data[:4], "big")
+    if len(data) < 4 + header_len:
+        raise ValueError("packet header truncated")
+    header = json.loads(data[4 : 4 + header_len].decode("utf-8"))
+    body = data[4 + header_len :]
+    return header, body
+
+
 def http_response(
     request_id,
     status,
     headers,
-    body_base64,
+    body=b"",
+    body_base64=None,
     error=None,
     status_text="",
     response_url="",
@@ -171,8 +198,10 @@ def http_response(
         "id": request_id,
         "status": status,
         "headers": headers,
-        "body_base64": body_base64,
+        "body": body,
     }
+    if body_base64 is not None:
+        result["body_base64"] = body_base64
     if status_text:
         result["status_text"] = status_text
     if response_url:

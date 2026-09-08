@@ -32,7 +32,7 @@ def test_static_page_bridges_http_methods_and_browser_apis():
     assert "window.addEventListener('submit'" in text
     assert "if(!form||e.defaultPrevented)return" in text
     assert "document.addEventListener('submit'" not in text
-    assert "body_base64" in text
+    assert "encodePacket" in text
     assert "formmethod" in text
     assert "response_url" in text
     assert "allow-scripts allow-forms'" in text
@@ -44,7 +44,7 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "async function prepareHtml" in text
     assert "script[src]" in text
     assert "img[src]" in text
-    assert "'data:'+type.split(';',1)[0]+';base64,'+body" in text
+    assert "'data:'+type.split(';',1)[0]+';base64,'+base64ForBytes(body)" in text
     assert "doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath))" in text
     assert "f.srcdoc=prepared" in text
     assert "window.WebSocket=ProxyWebSocket" in text

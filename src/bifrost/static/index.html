@@ -70,14 +70,17 @@ async function dumpPeerStats(reason){
   }catch(error){warn('getStats failed',{message:error.message})}
 }
 
-function request(method,path,headers={},bodyBase64=''){
+function encodePacket(header,bodyBytes){let hb=new TextEncoder().encode(JSON.stringify(header)),b=bodyBytes||new Uint8Array(0);if(b instanceof ArrayBuffer)b=new Uint8Array(b);else if(ArrayBuffer.isView(b)&&!(b instanceof Uint8Array))b=new Uint8Array(b.buffer,b.byteOffset,b.byteLength);let out=new Uint8Array(4+hb.length+b.length);new DataView(out.buffer).setUint32(0,hb.length);out.set(hb,4);out.set(b,4+hb.length);return out.buffer}
+function decodePacket(buf){if(buf.byteLength<4)throw Error('packet too short');let v=new DataView(buf),hl=v.getUint32(0);if(buf.byteLength<4+hl)throw Error('packet header truncated');let hb=new Uint8Array(buf,4,hl);return {header:JSON.parse(new TextDecoder().decode(hb)),body:new Uint8Array(buf.slice(4+hl))}}
+
+function request(method,path,headers={},body=null){
   return new Promise((ok,no)=>{
     let id=++seq;
     if(!dc||dc.readyState!=='open'){no(Error('WebRTC 数据通道未连接'));return}
     path=(path||'/').split('#',1)[0]||'/';
     pending.set(id,{ok,no});
-    let msg={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{},body_base64:bodyBase64};
-    try{dc.send(JSON.stringify(msg))}catch(e){pending.delete(id);no(e);return}
+    let header={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{}};
+    try{dc.send(encodePacket(header,body))}catch(e){pending.delete(id);no(e);return}
     setTimeout(()=>{if(pending.has(id)){pending.delete(id);no(Error('内网服务响应超时'))}},20000)
   })
 }
@@ -93,23 +96,21 @@ function frameHook(basePath){
     var BASE=${JSON.stringify(basePath)},calls=new Map(),next=0;
     var NativeRequest=window.Request,NativeResponse=window.Response,NativeFetch=window.fetch;
     var NativeURLSearchParams=window.URLSearchParams,NativeFormData=window.FormData,NativeBlob=window.Blob;
-    function b64(buf){var a=new Uint8Array(buf),s='';for(var i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)}
-    function bytes(s){var b=atob(s||''),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
     function headersObject(h){var o={};if(!h)return o;if(h.forEach)h.forEach(function(v,k){o[k]=v});else if(Array.isArray(h))h.forEach(function(x){o[x[0]]=x[1]});else Object.keys(h).forEach(function(k){o[k]=h[k]});return o}
     function hasHeader(h,name){name=name.toLowerCase();return Object.keys(h).some(function(k){return k.toLowerCase()===name})}
     function toPath(value,includeHash){var fallback='http://bifrost.invalid'+BASE,b=document.querySelector('base[href]'),base=fallback;if(b)try{base=new URL(b.getAttribute('href'),fallback).href}catch(_){}var u=new URL(String(value),base),path=u.pathname+u.search;if(!/^https?:$/.test(u.protocol))throw Error('不支持的 URL 协议');return includeHash?path+u.hash:path}
-    function ask(method,url,headers,bodyBase64,navigate){
-      return new Promise(function(resolve,reject){var id=++next;calls.set(id,{resolve:resolve,reject:reject});parent.postMessage({type:'bifrost-request',requestId:id,method:method||'GET',url:toPath(url),headers:headersObject(headers),body_base64:bodyBase64,navigate:!!navigate},'*')})
+    function ask(method,url,headers,body,navigate){
+      return new Promise(function(resolve,reject){var id=++next;calls.set(id,{resolve:resolve,reject:reject});parent.postMessage({type:'bifrost-request',requestId:id,method:method||'GET',url:toPath(url),headers:headersObject(headers),body:body,navigate:!!navigate},'*')})
     }
     function payload(body){
-      if(body===undefined||body===null)return Promise.resolve({bodyBase64:'',contentType:null});
-      if(typeof body==='string')return Promise.resolve({bodyBase64:b64(new TextEncoder().encode(body)),contentType:null});
-      if(body instanceof NativeURLSearchParams)return Promise.resolve({bodyBase64:b64(new TextEncoder().encode(body.toString())),contentType:'application/x-www-form-urlencoded;charset=UTF-8'});
-      if(body instanceof NativeBlob)return body.arrayBuffer().then(function(a){return {bodyBase64:b64(a),contentType:body.type||null}});
-      if(body instanceof ArrayBuffer)return Promise.resolve({bodyBase64:b64(body),contentType:null});
-      if(ArrayBuffer.isView(body))return Promise.resolve({bodyBase64:b64(body.buffer.slice(body.byteOffset,body.byteOffset+body.byteLength)),contentType:null});
+      if(body===undefined||body===null)return Promise.resolve({body:new Uint8Array(0),contentType:null});
+      if(typeof body==='string')return Promise.resolve({body:new TextEncoder().encode(body),contentType:null});
+      if(body instanceof NativeURLSearchParams)return Promise.resolve({body:new TextEncoder().encode(body.toString()),contentType:'application/x-www-form-urlencoded;charset=UTF-8'});
+      if(body instanceof NativeBlob)return body.arrayBuffer().then(function(a){return {body:new Uint8Array(a),contentType:body.type||null}});
+      if(body instanceof ArrayBuffer)return Promise.resolve({body:new Uint8Array(body),contentType:null});
+      if(ArrayBuffer.isView(body))return Promise.resolve({body:new Uint8Array(body.buffer,body.byteOffset,body.byteLength),contentType:null});
       if(body instanceof NativeFormData)return formPayload(body);
-      return Promise.resolve({bodyBase64:b64(new TextEncoder().encode(String(body))),contentType:null});
+      return Promise.resolve({body:new TextEncoder().encode(String(body)),contentType:null});
     }
     function formPayload(fd){
       var boundary='----bifrost-'+Math.random().toString(16).slice(2),parts=[];
@@ -118,7 +119,7 @@ function frameHook(basePath){
         else parts.push('--'+boundary+'\r\nContent-Disposition: form-data; name="'+key+'"\r\n\r\n'+value+'\r\n')
       });
       parts.push('--'+boundary+'--\r\n');
-      return new NativeBlob(parts).arrayBuffer().then(function(a){return {bodyBase64:b64(a),contentType:'multipart/form-data; boundary='+boundary}})
+      return new NativeBlob(parts).arrayBuffer().then(function(a){return {body:new Uint8Array(a),contentType:'multipart/form-data; boundary='+boundary}})
     }
     function submittedFormPayload(fd,enctype){
       enctype=(enctype||'application/x-www-form-urlencoded').split(';',1)[0].toLowerCase();
@@ -127,8 +128,8 @@ function frameHook(basePath){
       }
       return formPayload(fd)
     }
-    function responseFrom(r){var status=r.status||200,data=bytes(r.body_base64);if(status===204||status===205||status===304)data=null;var response=new NativeResponse(data,{status:status,statusText:r.status_text||'',headers:r.headers||{}});if(r.response_url)Object.defineProperty(response,'url',{value:r.response_url});return response}
-    function downloadLocal(value,filename){NativeFetch(value).then(function(response){if(!response.ok)throw Error('HTTP '+response.status);return response.arrayBuffer().then(function(buffer){parent.postMessage({type:'bifrost-download-data',data:b64(buffer),contentType:response.headers.get('content-type')||'',filename:filename||''},'*')})}).catch(function(error){parent.postMessage({type:'bifrost-download-error',error:error.message||String(error)},'*')})}
+    function responseFrom(r){var status=r.status||200,data=r.body||new Uint8Array(0);if(status===204||status===205||status===304)data=null;var response=new NativeResponse(data,{status:status,statusText:r.status_text||'',headers:r.headers||{}});if(r.response_url)Object.defineProperty(response,'url',{value:r.response_url});return response}
+    function downloadLocal(value,filename){NativeFetch(value).then(function(response){if(!response.ok)throw Error('HTTP '+response.status);return response.arrayBuffer().then(function(buffer){parent.postMessage({type:'bifrost-download-data',data:new Uint8Array(buffer),contentType:response.headers.get('content-type')||'',filename:filename||''},'*')})}).catch(function(error){parent.postMessage({type:'bifrost-download-error',error:error.message||String(error)},'*')})}
     window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-response')return;var p=calls.get(e.data.requestId);if(!p)return;calls.delete(e.data.requestId);if(e.data.error)p.reject(Error(e.data.error));else p.resolve(e.data.response||{})});
     window.__bifrostNavigate=function(value){parent.postMessage({type:'bifrost-nav',href:toPath(value,true)},'*')};
     var socketNext=0,sockets=new Map();
@@ -137,19 +138,19 @@ function frameHook(basePath){
     class ProxyWebSocket extends EventTarget{
       constructor(url,protocols){super();var u=socketUrl(url),list=socketProtocols(protocols);this.url=u.href;this.readyState=ProxyWebSocket.CONNECTING;this.bufferedAmount=0;this.extensions='';this.protocol='';this.binaryType='blob';this._id=String(++socketNext);sockets.set(this._id,this);parent.postMessage({type:'bifrost-websocket',action:'open',socketId:this._id,url:u.href,protocols:list},'*')}
       _emit(type,event){this.dispatchEvent(event);var handler=this['on'+type];if(typeof handler==='function')handler.call(this,event)}
-      send(data){if(this.readyState!==ProxyWebSocket.OPEN)throw new DOMException('WebSocket is not open','InvalidStateError');var self=this;if(typeof data==='string'){parent.postMessage({type:'bifrost-websocket',action:'send',socketId:this._id,data_type:'text',data:data},'*');return}var promise=data instanceof NativeBlob?data.arrayBuffer():data instanceof ArrayBuffer?Promise.resolve(data):ArrayBuffer.isView(data)?Promise.resolve(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength)):Promise.reject(new TypeError('Unsupported WebSocket message'));promise.then(function(buffer){if(self.readyState===ProxyWebSocket.OPEN)parent.postMessage({type:'bifrost-websocket',action:'send',socketId:self._id,data_type:'binary',data:b64(buffer)},'*')}).catch(function(){self._emit('error',new Event('error'))})}
+      send(data){if(this.readyState!==ProxyWebSocket.OPEN)throw new DOMException('WebSocket is not open','InvalidStateError');var self=this;if(typeof data==='string'){parent.postMessage({type:'bifrost-websocket',action:'send',socketId:this._id,data_type:'text',data:data},'*');return}var promise=data instanceof NativeBlob?data.arrayBuffer():data instanceof ArrayBuffer?Promise.resolve(data):ArrayBuffer.isView(data)?Promise.resolve(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength)):Promise.reject(new TypeError('Unsupported WebSocket message'));promise.then(function(buffer){if(self.readyState===ProxyWebSocket.OPEN)parent.postMessage({type:'bifrost-websocket',action:'send',socketId:self._id,data_type:'binary',data:new Uint8Array(buffer)},'*')}).catch(function(){self._emit('error',new Event('error'))})}
       close(code,reason){if(code!==undefined&&code!==1000&&!(code>=3000&&code<=4999))throw new DOMException('Invalid WebSocket close code','InvalidAccessError');reason=reason===undefined?'':String(reason);if(new TextEncoder().encode(reason).length>123)throw new DOMException('WebSocket close reason is too long','SyntaxError');if(this.readyState===ProxyWebSocket.CLOSED||this.readyState===ProxyWebSocket.CLOSING)return;this.readyState=ProxyWebSocket.CLOSING;parent.postMessage({type:'bifrost-websocket',action:'close',socketId:this._id,code:code===undefined?1000:code,reason:reason},'*')}
     }
     Object.assign(ProxyWebSocket,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});Object.assign(ProxyWebSocket.prototype,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});window.WebSocket=ProxyWebSocket;
-    window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-websocket-event')return;var m=e.data,socket=sockets.get(String(m.socketId));if(!socket)return;if(m.event==='open'){socket.readyState=ProxyWebSocket.OPEN;socket.protocol=m.protocol||'';socket._emit('open',new Event('open'))}else if(m.event==='message'){var data=m.data_type==='binary'?(socket.binaryType==='arraybuffer'?bytes(m.data).buffer:new NativeBlob([bytes(m.data)])):m.data;socket._emit('message',new MessageEvent('message',{data:data}))}else if(m.event==='error'){socket._emit('error',new Event('error'))}else if(m.event==='close'){socket.readyState=ProxyWebSocket.CLOSED;sockets.delete(socket._id);socket._emit('close',new CloseEvent('close',{code:m.code||1006,reason:m.reason||'',wasClean:(m.code||1006)!==1006}))}});
+    window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-websocket-event')return;var m=e.data,socket=sockets.get(String(m.socketId));if(!socket)return;if(m.event==='open'){socket.readyState=ProxyWebSocket.OPEN;socket.protocol=m.protocol||'';socket._emit('open',new Event('open'))}else if(m.event==='message'){var data=m.data;if(m.data_type==='binary'){var raw=m.data;if(socket.binaryType==='arraybuffer')data=(raw.byteOffset===0&&raw.byteLength===raw.buffer.byteLength)?raw.buffer:raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength);else data=new NativeBlob([raw])}socket._emit('message',new MessageEvent('message',{data:data}))}else if(m.event==='error'){socket._emit('error',new Event('error'))}else if(m.event==='close'){socket.readyState=ProxyWebSocket.CLOSED;sockets.delete(socket._id);socket._emit('close',new CloseEvent('close',{code:m.code||1006,reason:m.reason||'',wasClean:(m.code||1006)!==1006}))}});
     window.fetch=function(input,init){
       init=init||{};var source=input instanceof NativeRequest?input:null,method=(init.method||(source&&source.method)||'GET').toUpperCase(),url=(source&&source.url)||input,h=headersObject(source&&source.headers);Object.assign(h,headersObject(init.headers));
       var bodyPromise=init.body!==undefined?payload(init.body):(source&&method!=='GET'&&method!=='HEAD'?source.clone().arrayBuffer().then(payload):payload(null));
-      return bodyPromise.then(function(p){if(p.contentType&&!hasHeader(h,'content-type'))h['content-type']=p.contentType;return ask(method,url,h,p.bodyBase64,false)}).then(responseFrom)
+      return bodyPromise.then(function(p){if(p.contentType&&!hasHeader(h,'content-type'))h['content-type']=p.contentType;return ask(method,url,h,p.body,false)}).then(responseFrom)
     };
     document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(!a||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();e.stopPropagation();if(a.hasAttribute('download')){var href=a.getAttribute('href')||'';if(/^(?:blob|data):/i.test(href)){downloadLocal(href,a.getAttribute('download')||'');return}parent.postMessage({type:'bifrost-download',href:toPath(href,true),filename:a.getAttribute('download')||''},'*');return}parent.postMessage({type:'bifrost-nav',href:toPath(a.getAttribute('href'),true)},'*')},true);document.addEventListener('auxclick',function(e){var a=e.target.closest&&e.target.closest('a[href]');if(a){e.preventDefault();e.stopPropagation()}},true);
     // Application handlers run first; this only emulates an unhandled native submit.
-    window.addEventListener('submit',function(e){var form=e.target,button=e.submitter;if(!form||e.defaultPrevented)return;e.preventDefault();var method=((button&&button.getAttribute('formmethod'))||form.getAttribute('method')||'GET').toUpperCase(),h={},action=(button&&button.getAttribute('formaction'))||form.getAttribute('action')||BASE,enctype=(button&&button.getAttribute('formenctype'))||form.getAttribute('enctype'),fd;try{fd=new NativeFormData(form,button)}catch(_){fd=new NativeFormData(form);if(button&&button.name)fd.append(button.name,button.value)}if(method==='DIALOG')return;if(method==='GET'){var q=new NativeURLSearchParams(fd),u=toPath(action,true),join=u.indexOf('?')<0?'?':'&';parent.postMessage({type:'bifrost-nav',href:u+(q.toString()?join+q.toString():'')},'*');return}if(method==='HEAD'){ask('HEAD',action,h,'',true).catch(function(){});return}submittedFormPayload(fd,enctype).then(function(p){if(p.contentType)h['content-type']=p.contentType;return ask(method,action,h,p.bodyBase64,true)}).catch(function(){})});
+    window.addEventListener('submit',function(e){var form=e.target,button=e.submitter;if(!form||e.defaultPrevented)return;e.preventDefault();var method=((button&&button.getAttribute('formmethod'))||form.getAttribute('method')||'GET').toUpperCase(),h={},action=(button&&button.getAttribute('formaction'))||form.getAttribute('action')||BASE,enctype=(button&&button.getAttribute('formenctype'))||form.getAttribute('enctype'),fd;try{fd=new NativeFormData(form,button)}catch(_){fd=new NativeFormData(form);if(button&&button.name)fd.append(button.name,button.value)}if(method==='DIALOG')return;if(method==='GET'){var q=new NativeURLSearchParams(fd),u=toPath(action,true),join=u.indexOf('?')<0?'?':'&';parent.postMessage({type:'bifrost-nav',href:u+(q.toString()?join+q.toString():'')},'*');return}if(method==='HEAD'){ask('HEAD',action,h,null,true).catch(function(){});return}submittedFormPayload(fd,enctype).then(function(p){if(p.contentType)h['content-type']=p.contentType;return ask(method,action,h,p.body,true)}).catch(function(){})});
   })();`;
   return '<scr'+'ipt>'+code+'</scr'+'ipt>'
 }
@@ -161,7 +162,7 @@ function safeDownloadName(value){return String(value||'').replace(/[\u0000-\u001
 function dispositionFilename(value){let match=String(value||'').match(/(?:^|;)\s*filename\*\s*=\s*(?:UTF-8''|utf-8'')?([^;]*)/i);if(match){let name=match[1].trim().replace(/^"|"$/g,'');try{name=decodeURIComponent(name)}catch(_){}return name}match=String(value||'').match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]*))/i);return match?(match[1]||match[2]).trim():''}
 function downloadName(response,requested,path){let fromHeader=dispositionFilename(headerValue(response.headers,'content-disposition'));if(fromHeader)return safeDownloadName(fromHeader);if(requested)return safeDownloadName(requested);let value=(path||'').split('?',1)[0].split('/').pop();try{value=decodeURIComponent(value)}catch(_){}return safeDownloadName(value)}
 function hasDownloadDisposition(response){return /(?:^|;)\s*attachment(?:\s*;|$)/i.test(headerValue(response.headers,'content-disposition'))}
-function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([bytesFor(response.body_base64)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
+function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([response.body||new Uint8Array(0)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
 function isDownloadResponse(response,requested=''){let status=Number(response.status||0);return status>=200&&status<300&& (!!requested||hasDownloadDisposition(response))}
 function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(')}
 async function prepareHtml(text){
@@ -172,48 +173,52 @@ async function prepareHtml(text){
   await Promise.all(assets.map(async node=>{
     let attribute=node.hasAttribute('src')?'src':node.hasAttribute('poster')?'poster':'href',value=node.getAttribute(attribute);
     try{
-      let response=await request('GET',pathFor(value),{accept:'*/*'},'');
+      let response=await request('GET',pathFor(value),{accept:'*/*'},null);
       if(response.status<200||response.status>=300)throw Error('HTTP '+response.status);
       let type=headerValue(response.headers,'content-type')||((node.tagName==='SCRIPT')?'text/javascript':'application/octet-stream');
-      let body=response.body_base64;
-      if(node.tagName==='SCRIPT')body=base64ForBytes(new TextEncoder().encode(bridgeScript(new TextDecoder().decode(bytesFor(body)))));
+      let body=response.body;
+      if(node.tagName==='SCRIPT')body=new TextEncoder().encode(bridgeScript(new TextDecoder().decode(body)));
       // Blob URLs belong to the parent origin and are blocked by the opaque sandbox.
-      node.setAttribute(attribute,'data:'+type.split(';',1)[0]+';base64,'+body);node.removeAttribute('integrity');node.removeAttribute('crossorigin')
+      node.setAttribute(attribute,'data:'+type.split(';',1)[0]+';base64,'+base64ForBytes(body));node.removeAttribute('integrity');node.removeAttribute('crossorigin')
     }catch(error){node.removeAttribute(attribute);warn('subresource proxy failed',{url:value,message:error.message})}
   }));
   return '<!doctype html>'+doc.documentElement.outerHTML
 }
-function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(JSON.stringify({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{let downloaded=await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},''));if(dc&&dc.readyState==='open')st(downloaded?'下载已开始':'已连接 · '+connectionId,'ok')}catch(e){if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
+function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(encodePacket({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{let downloaded=await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},null));if(dc&&dc.readyState==='open')st(downloaded?'下载已开始':'已连接 · '+connectionId,'ok')}catch(e){if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
 async function render(r,requested=''){
   if(isDownloadResponse(r,requested)){triggerDownload(r,requested,r.response_url||currentPath);return true}
-  let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(bytesFor(r.body_base64));
+  let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(r.body||new Uint8Array(0));
   closeAppSockets();frameSerial++;
   if(ct.includes('text/html')){let prepared=await prepareHtml(text),f=document.createElement('iframe');f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=prepared;view.replaceChildren(f)}
   else{let p=document.createElement('pre');p.textContent=text;view.replaceChildren(p);frame=null}
   return false
 }
-function deliverSocketEvent(message){let entry=appSockets.get(message.socket_id);if(!entry)return;let event={type:'bifrost-websocket-event',socketId:entry.socketId};if(message.type==='websocket_opened'){event.event='open';event.protocol=message.protocol||''}else if(message.type==='websocket_message'){event.event='message';event.data_type=message.data_type;event.data=message.data}else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){event.event='error';entry.source.postMessage(event,'*');event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};appSockets.delete(message.socket_id)}else if(message.type==='websocket_closed'){event.event='close';event.code=message.code||1006;event.reason=message.reason||'';appSockets.delete(message.socket_id)}else return;entry.source.postMessage(event,'*')}
+function deliverSocketEvent(message,body){let entry=appSockets.get(message.socket_id);if(!entry)return;let event={type:'bifrost-websocket-event',socketId:entry.socketId};if(message.type==='websocket_opened'){event.event='open';event.protocol=message.protocol||''}else if(message.type==='websocket_message'){event.event='message';event.data_type=message.data_type;event.data=message.data_type==='binary'?(body||new Uint8Array(0)):message.data}else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){event.event='error';entry.source.postMessage(event,'*');event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};appSockets.delete(message.socket_id)}else if(message.type==='websocket_closed'){event.event='close';event.code=message.code||1006;event.reason=message.reason||'';appSockets.delete(message.socket_id)}else return;entry.source.postMessage(event,'*')}
 function failTransport(){for(let [id,p] of pending){p.no(Error('WebRTC 数据通道已断开'))}pending.clear();for(let entry of appSockets.values()){entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'error'},'*');entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''},'*')}appSockets.clear()}
 window.onmessage=async e=>{
   if(!e.data||!frame||e.source!==frame.contentWindow)return;
   let source=e.source,q=e.data;
   if(q.type==='bifrost-nav'){let href=q.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}
-  if(q.type==='bifrost-download-data'){try{triggerDownload({headers:{'content-type':q.contentType||''},body_base64:q.data||''},q.filename||'','');st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
+  if(q.type==='bifrost-download-data'){try{triggerDownload({headers:{'content-type':q.contentType||''},body:q.data||new Uint8Array(0)},q.filename||'','');st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
   if(q.type==='bifrost-download-error'){st('下载失败','bad',q.error||'无法读取下载内容');return}
-  if(q.type==='bifrost-download'){try{let p=pathFor(q.href||'/'),r=await request('GET',p,{accept:'*/*'},'');if(r.status<200||r.status>=300){await render(r);st('下载失败','bad','HTTP '+r.status);return}triggerDownload(r,q.filename||'',p);st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
+  if(q.type==='bifrost-download'){try{let p=pathFor(q.href||'/'),r=await request('GET',p,{accept:'*/*'},null);if(r.status<200||r.status>=300){await render(r);st('下载失败','bad','HTTP '+r.status);return}triggerDownload(r,q.filename||'',p);st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
   if(q.type==='bifrost-websocket'){
     let remoteId=String(frameSerial)+':'+String(q.socketId);
     try{
-      if(q.action==='open'){let url=new URL(q.url);if(!/^wss?:$/.test(url.protocol))throw Error('unsupported WebSocket URL');appSockets.set(remoteId,{source,socketId:String(q.socketId)});dc.send(JSON.stringify({type:'websocket_open',socket_id:remoteId,path:url.pathname+url.search,protocols:q.protocols||[]}))}
-      else if(q.action==='send'&&appSockets.has(remoteId))dc.send(JSON.stringify({type:'websocket_send',socket_id:remoteId,data_type:q.data_type,data:q.data}))
-      else if(q.action==='close'&&appSockets.has(remoteId))dc.send(JSON.stringify({type:'websocket_close',socket_id:remoteId,code:q.code,reason:q.reason||''}))
+      if(q.action==='open'){let url=new URL(q.url);if(!/^wss?:$/.test(url.protocol))throw Error('unsupported WebSocket URL');appSockets.set(remoteId,{source,socketId:String(q.socketId)});dc.send(encodePacket({type:'websocket_open',socket_id:remoteId,path:url.pathname+url.search,protocols:q.protocols||[]}))}
+      else if(q.action==='send'&&appSockets.has(remoteId)){
+        let header={type:'websocket_send',socket_id:remoteId,data_type:q.data_type};
+        if(q.data_type==='text')header.data=q.data;
+        dc.send(encodePacket(header,q.data_type==='binary'?q.data:null))
+      }
+      else if(q.action==='close'&&appSockets.has(remoteId))dc.send(encodePacket({type:'websocket_close',socket_id:remoteId,code:q.code,reason:q.reason||''}))
       else throw Error('invalid WebSocket action')
     }catch(error){appSockets.delete(remoteId);source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'error'},'*');source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'close',code:1006,reason:''},'*')}
     return
   }
   if(q.type!=='bifrost-request')return;
-  try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body_base64);if(q.navigate){if(await render(r))return;p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
+  try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body);if(q.navigate){if(await render(r))return;p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
 };
 $('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>{if(dc&&dc.readyState==='open')navigate(currentPath,false);else reconnectNow('refresh requested')};setAddr(currentPath);
 function teardownTransport(generation){
@@ -288,8 +293,8 @@ async function connect(){
         }
       }catch(error){warn('signaling message failed',{message:error.message})}
     };
-    localDc=localPc.createDataChannel('http');dc=localDc;
-    localDc.onmessage=e=>{if(generation!==transportGeneration)return;let m=JSON.parse(e.data);if(String(m.type||'').startsWith('websocket_')){deliverSocketEvent(m);return}let p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.no(Error(m.error)):p.ok(m)}};
+    localDc=localPc.createDataChannel('http');localDc.binaryType='arraybuffer';dc=localDc;
+    localDc.onmessage=e=>{if(generation!==transportGeneration)return;let header,body;if(e.data instanceof ArrayBuffer){let p=decodePacket(e.data);header=p.header;body=p.body}else{header=JSON.parse(e.data);body=header.body_base64?bytesFor(header.body_base64):(header.data_type==='binary'&&typeof header.data==='string')?bytesFor(header.data):new Uint8Array(0)}if(String(header.type||'').startsWith('websocket_')){deliverSocketEvent(header,body);return}let p=pending.get(header.id);if(p){pending.delete(header.id);header.error?p.no(Error(header.error)):p.ok({status:header.status,status_text:header.status_text||'',headers:header.headers||{},response_url:header.response_url||'',body})}};
     localDc.onopen=async()=>{if(generation!==transportGeneration)return;debug('data channel open',{label:localDc.label,id:localDc.id});connecting=false;reconnectAttempt=0;clearTimeout(connectTimer);connectTimer=null;st('已连接 · '+connectionId,'ok');await dumpPeerStats('data channel open');if(generation===transportGeneration)await navigate(currentPath,false)};
     localDc.onclose=()=>{debug('data channel closed',{label:localDc.label,id:localDc.id});transportLost('data channel closed',generation)};
     localDc.onerror=event=>warn('data channel error',{type:event.type});

@@ -27,6 +27,9 @@ from .auth import (
     public_key_text,
 )
 from .protocol import (
+    decode_body,
+    decode_packet,
+    encode_packet,
     http_response,
     validate_ice_port,
     validate_ice_servers,
@@ -149,7 +152,21 @@ async def _dispatch(raw, handler: MessageHandler, reply: MessageSender):
     message = None
     request_id = None
     try:
-        message = json.loads(raw)
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            header, body = decode_packet(bytes(raw))
+            message = header
+            message["body"] = body
+        else:
+            message = json.loads(raw)
+            if "body" not in message:
+                if "body_base64" in message:
+                    message["body"] = decode_body(message["body_base64"])
+                elif message.get("data_type") == "binary" and isinstance(
+                    message.get("data"), str
+                ):
+                    message["body"] = decode_body(message["data"])
+                else:
+                    message["body"] = b""
         request_id = message.get("id")
         await handler(message, reply)
     except Exception as exc:
@@ -167,7 +184,7 @@ async def _dispatch(raw, handler: MessageHandler, reply: MessageSender):
                 "error": str(exc),
             }
         else:
-            response = http_response(request_id, 502, {}, "", error=str(exc))
+            response = http_response(request_id, 502, {}, body=b"", error=str(exc))
         with suppress(ConnectionError):
             await reply(response)
 
@@ -280,11 +297,14 @@ async def run_agent(cfg, handler: MessageHandler, identity=None):
                 def channel(ch):
                     log.info("datachannel=%s", ch.label)
 
-                    async def reply(result):
+                    async def reply(result, body=None):
                         if ch.readyState != "open":
                             raise ConnectionError("data channel is closed")
                         try:
-                            ch.send(json.dumps(result))
+                            if isinstance(result, bytes):
+                                ch.send(result)
+                            else:
+                                ch.send(encode_packet(result, body))
                         except Exception as exc:
                             raise ConnectionError("data channel send failed") from exc
 

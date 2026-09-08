@@ -24,7 +24,7 @@ from aiortc import (
 from aiortc.sdp import candidate_from_sdp
 from yarl import URL
 
-from .protocol import encode_body
+from .protocol import decode_packet, encode_packet
 from .room_auth import validate_room_name
 
 _METHOD = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -225,29 +225,31 @@ class BifrostHTTPClient:
         response_future = loop.create_future()
         self._responses[request_id] = response_future
         try:
-            self._channel.send(json.dumps({
-                "type": "http_request",
-                "id": request_id,
-                "method": method,
-                "path": _request_path(path),
-                "headers": dict(headers or {}),
-                "body_base64": encode_body(body),
-            }))
-            response = await asyncio.wait_for(response_future, self.timeout)
+            self._channel.send(
+                encode_packet(
+                    {
+                        "type": "http_request",
+                        "id": request_id,
+                        "method": method,
+                        "path": _request_path(path),
+                        "headers": dict(headers or {}),
+                    },
+                    body,
+                )
+            )
+            response_header, response_body = await asyncio.wait_for(
+                response_future, self.timeout
+            )
         finally:
             self._responses.pop(request_id, None)
-        if response.get("type") != "http_response":
+        if response_header.get("type") != "http_response":
             raise BifrostCurlError("invalid HTTP response from Bifrost client")
-        try:
-            response_body = base64.b64decode(response["body_base64"], validate=True)
-        except (KeyError, ValueError) as exc:
-            raise BifrostCurlError("invalid HTTP response body from Bifrost client") from exc
         return HTTPResponse(
-            status=response["status"],
-            reason=response.get("status_text", ""),
-            headers=response.get("headers", {}),
+            status=response_header["status"],
+            reason=response_header.get("status_text", ""),
+            headers=response_header.get("headers", {}),
             body=response_body,
-            url=response.get("response_url", ""),
+            url=response_header.get("response_url", ""),
         )
 
     async def _load_room_config(self):
@@ -338,13 +340,22 @@ class BifrostHTTPClient:
 
     def _on_channel_message(self, raw):
         try:
-            message = json.loads(raw)
-            request_id = message.get("id")
+            if isinstance(raw, (bytes, bytearray, memoryview)):
+                header, body = decode_packet(bytes(raw))
+            else:
+                header = json.loads(raw)
+                if "body" in header and isinstance(header["body"], bytes):
+                    body = header.pop("body")
+                elif "body_base64" in header:
+                    body = base64.b64decode(header.pop("body_base64"), validate=True)
+                else:
+                    body = b""
+            request_id = header.get("id")
         except (TypeError, ValueError, json.JSONDecodeError):
             return
         response = self._responses.get(request_id)
         if response is not None and not response.done():
-            response.set_result(message)
+            response.set_result((header, body))
 
 
 def _parse_headers(values):

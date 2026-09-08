@@ -2,8 +2,10 @@ import pytest
 
 from bifrost.protocol import (
     decode_body,
+    decode_packet,
     default_config_path,
     encode_body,
+    encode_packet,
     http_response,
     resolve_config_path,
     validate_ice_servers,
@@ -75,7 +77,7 @@ def test_validate_ice_servers_rejects_unusable_entries(servers):
 
 
 def test_http_response_with_error():
-    response = http_response(2, 502, {}, "", error="upstream unavailable")
+    response = http_response(2, 502, {}, error="upstream unavailable")
     assert response["type"] == "http_response"
     assert response["id"] == 2
     assert response["status"] == 502
@@ -88,15 +90,54 @@ def test_body_encoding_preserves_binary_data():
 
 
 def test_http_response_can_carry_binary_body_and_status_text():
-    encoded = encode_body(b"\x89PNG\r\n")
     response = http_response(
         "1",
         201,
         {"content-type": "image/png"},
-        encoded,
+        body=b"\x89PNG\r\n",
         status_text="Created",
         response_url="/images/logo.png",
     )
-    assert response["body_base64"] == encoded
+    assert response["body"] == b"\x89PNG\r\n"
     assert response["status_text"] == "Created"
     assert response["response_url"] == "/images/logo.png"
+
+
+def test_packet_encoding_and_decoding():
+    header = {"type": "http_request", "id": 1, "path": "/test"}
+    body = b"\x00\x01\x02\xffbinary\xfe"
+    packet = encode_packet(header, body)
+    decoded_header, decoded_body = decode_packet(packet)
+    assert decoded_header == header
+    assert decoded_body == body
+
+
+def test_packet_encoding_with_body_in_header():
+    header = {"type": "http_response", "id": 2, "body": b"payload"}
+    packet = encode_packet(header)
+    decoded_header, decoded_body = decode_packet(packet)
+    assert "body" not in decoded_header
+    assert decoded_header == {"type": "http_response", "id": 2}
+    assert decoded_body == b"payload"
+
+
+def test_packet_decoding_errors():
+    with pytest.raises(ValueError, match="packet too short"):
+        decode_packet(b"\x00\x00")
+    with pytest.raises(ValueError, match="packet header truncated"):
+        decode_packet(b"\x00\x00\x00\x10abc")
+
+
+def test_packet_encoding_strips_body_base64_and_handles_none_body():
+    header = {
+        "type": "http_response",
+        "id": 3,
+        "body": None,
+        "body_base64": "eyJpZCI6MX0=",
+    }
+    packet = encode_packet(header)
+    decoded_header, decoded_body = decode_packet(packet)
+    assert "body" not in decoded_header
+    assert "body_base64" not in decoded_header
+    assert decoded_header == {"type": "http_response", "id": 3}
+    assert decoded_body == b""

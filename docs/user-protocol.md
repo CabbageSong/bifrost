@@ -37,8 +37,8 @@ WebRTC 建立完成后，业务数据通常沿用户端和内网 client 之间�
 | server 页面 | HTTP/HTTPS | 获取 room 配置，必要时提交密码 |
 | 信令 | WebSocket，文本帧 | 传输 `agent_online`、SDP 和 ICE candidate |
 | P2P 传输 | WebRTC ICE + DTLS + SCTP | 在用户端和 agent 之间建立安全连接 |
-| 业务通道 | WebRTC DataChannel，文本帧 | 传输 JSON 请求和响应 |
-| 业务编码 | JSON + Base64 | 表示 HTTP 方法、headers、二进制 body |
+| 业务通道 | WebRTC DataChannel，二进制帧 | 传输分包的请求和响应（兼容传统纯文本 JSON 帧） |
+| 业务编码 | 二进制封包 (4 字节 Header 长度 + JSON Header + Raw Body) | 高效传输 HTTP 方法、headers 及原始二进制 body（无需 Base64 转换） |
 | 内网访问 | HTTP/HTTPS | agent 访问其配置的本地目标 |
 
 假设 server 地址为：
@@ -246,9 +246,20 @@ sequenceDiagram
 
 ## 5. HTTP 封包协议
 
-DataChannel 使用 UTF-8 文本帧，每帧是一个 JSON 对象。HTTP 请求和响应体统一使用标准 Base64（RFC 4648，允许 `=` padding），所以二进制内容不会经过文本编码损坏。
+DataChannel 采用二进制封包格式（兼容传统 UTF-8 纯文本 JSON 帧）。封包结构由 4 字节大端整数长度前缀、JSON 头部和紧随其后的原始 Body 字节流组成：
+
+```text
++-----------------------+-----------------------------+-----------------------+
+|  Header Length (uint) |       Header (JSON UTF-8)   |       Body (Bytes)    |
+|        4 Bytes        |        header_len Bytes     |         rest          |
++-----------------------+-----------------------------+-----------------------+
+```
+
+该设计消除了 Base64 编解码产生的 ~33% 带宽膨胀与 CPU 损耗。如果请求或响应没有 body（例如常规 GET 请求或 204 无内容响应），Header 之后没有额外的 Body 字节。
 
 ### 5.1 用户端 -> agent：HTTP 请求
+
+二进制封包的 Header JSON：
 
 ```json
 {
@@ -259,12 +270,13 @@ DataChannel 使用 UTF-8 文本帧，每帧是一个 JSON 对象。HTTP 请求�
   "headers": {
     "accept": "application/json",
     "content-type": "application/json"
-  },
-  "body_base64": "eyJuYW1lIjoiZGVtbyJ9"
+  }
 }
 ```
 
-字段说明：
+紧随 Header JSON 之后附加原始 Body 字节流（例如 `{"name":"demo"}` 对应的 15 字节）。
+
+Header 字段说明：
 
 | 字段 | 必需 | 说明 |
 | --- | --- | --- |
@@ -273,7 +285,9 @@ DataChannel 使用 UTF-8 文本帧，每帧是一个 JSON 对象。HTTP 请求�
 | `method` | 是 | HTTP 方法，建议使用大写 ASCII token |
 | `path` | 是 | 以 `/` 开头的路径和 query string；不要包含 fragment、scheme、host 或 room 前缀 |
 | `headers` | 是 | JSON 对象，key/value 都是字符串；没有 header 时发送 `{}` |
-| `body_base64` | 是 | 请求体的 Base64；空 body 使用空字符串 `""` |
+
+> [!NOTE]
+> 向后兼容说明：agent 端亦兼容旧版纯文本 JSON 帧。如果收到纯文本 JSON 且包含 `body_base64` 字段，仍可自动解码并转发。
 
 agent 收到后使用自己的 service 配置拼接目标地址：
 
@@ -283,9 +297,11 @@ agent 收到后使用自己的 service 配置拼接目标地址：
 
 用户端不应发送或依赖 `Host`、`Content-Length`。当前 agent 会丢弃这两个 header，由底层 HTTP 库重新生成。其他 header 会尽量转发，包括自定义 header、Cookie、Authorization 等。
 
-请求不会经过分块流式传输；当前协议要求 agent 收齐一个完整 JSON DataChannel 消息后才开始访问内网 HTTP 服务。实现者应为 Base64 膨胀和 JSON 开销预留空间，单条消息不要接近 WebSocket 的 8 MiB 上限。当前没有 HTTP body chunk/stream 协议，超大文件需要另行设计扩展。
+请求不会经过分块流式传输；当前协议要求 agent 收齐一个完整 DataChannel 封包消息后才开始访问内网 HTTP 服务。实现者应为 JSON 开销预留空间，单条消息不要接近 WebSocket/DataChannel 的缓冲区上限。当前没有 HTTP body chunk/stream 协议，超大文件需要另行设计扩展。
 
 ### 5.2 agent -> 用户端：HTTP 响应
+
+二进制封包的 Header JSON：
 
 ```json
 {
@@ -297,12 +313,13 @@ agent 收到后使用自己的 service 配置拼接目标地址：
     "content-type": "application/json",
     "content-length": "16"
   },
-  "body_base64": "eyJpZCI6MX0=",
   "response_url": "/api/items?id=1"
 }
 ```
 
-字段说明：
+紧随 Header JSON 之后附加原始响应 Body 字节流。
+
+Header 字段说明：
 
 | 字段 | 必需 | 说明 |
 | --- | --- | --- |
@@ -310,7 +327,6 @@ agent 收到后使用自己的 service 配置拼接目标地址：
 | `id` | 是 | 对应请求的 `id` |
 | `status` | 是 | 最终 HTTP status code |
 | `headers` | 是 | 响应 headers 对象 |
-| `body_base64` | 是 | 完整响应体；没有响应体时为 `""` |
 | `status_text` | 否 | reason phrase，例如 `OK`、`Created` |
 | `response_url` | 否 | agent HTTP session 最终 URL 的 path/query |
 | `error` | 否 | agent 转发失败时的错误描述 |
@@ -375,27 +391,32 @@ agent 会为每个 DataChannel 消息异步创建转发任务，所以多个请�
 }
 ```
 
-二进制帧：
+二进制帧（使用二进制封包，Header 之后附带原始二进制数据）：
 
+Header JSON:
 ```json
 {
   "type": "websocket_send",
   "socket_id": "socket-1",
-  "data_type": "binary",
-  "data": "AAECAw=="
+  "data_type": "binary"
 }
 ```
+紧随其后附带原始二进制 Payload 字节。
 
-agent 发回：
+agent 发回二进制帧：
 
+Header JSON:
 ```json
 {
   "type": "websocket_message",
   "socket_id": "socket-1",
-  "data_type": "binary",
-  "data": "AAECAw=="
+  "data_type": "binary"
 }
 ```
+紧随其后附带原始二进制 Payload 字节。
+
+> [!NOTE]
+> 兼容性说明：如果使用旧版文本 JSON 发送二进制帧，仍支持 `data_type: "binary"` 配合 Base64 编码的 `data` 字符串。
 
 ### 关闭
 
@@ -419,7 +440,7 @@ agent 发回：
 }
 ```
 
-当前允许的主动关闭码是 `1000`、`1001` 或 `3000--4999`；reason 的 UTF-8 长度不能超过 123 bytes。WebSocket 二进制数据同样使用 Base64。
+当前允许的主动关闭码是 `1000`、`1001` 或 `3000--4999`；reason 的 UTF-8 长度不能超过 123 bytes。WebSocket 二进制数据直接传输原始字节流，无 Base64 开销。
 
 ## 7. 连接关闭、重连与异常
 
@@ -472,7 +493,10 @@ function connect(room, server):
             else:
                 queue_remote_candidate(message.candidate)
 
-    dc.on_message = dispatch_response_by_id
+    dc.binary_type = "arraybuffer"
+    dc.on_message = function(raw_data):
+        header, body = decode_packet(raw_data)
+        dispatch_response_by_id(header, body)
     dc.on_open = mark_ready
 
     offer = pc.CREATE_OFFER()
@@ -480,18 +504,28 @@ function connect(room, server):
     SEND_JSON(ws, {type: "offer", sdp: pc.local_description})
     WAIT_UNTIL(dc.is_open)
 
+function encode_packet(header, body_bytes):
+    header_bytes = UTF8_ENCODE(JSON_STRINGIFY(header))
+    return UINT32_BE(LEN(header_bytes)) + header_bytes + body_bytes
+
+function decode_packet(data_bytes):
+    header_len = UINT32_BE_DECODE(data_bytes[0:4])
+    header = JSON_PARSE(UTF8_DECODE(data_bytes[4:4 + header_len]))
+    body = data_bytes[4 + header_len:]
+    return header, body
+
 function request(method, path, headers, bytes):
     id = next_unique_id()
-    SEND_DATA_CHANNEL_JSON({
+    packet = encode_packet({
         type: "http_request",
         id: id,
         method: UPPER_ASCII(method),
         path: path,
-        headers: headers,
-        body_base64: BASE64(bytes)
-    })
-    response = WAIT_FOR_RESPONSE_ID(id)
-    return BASE64_DECODE(response.body_base64)
+        headers: headers
+    }, bytes)
+    SEND_DATA_CHANNEL_BYTES(packet)
+    response_header, response_body = WAIT_FOR_RESPONSE_ID(id)
+    return response_body
 ```
 
 不同 WebRTC SDK 的 API 名称和 candidate 生命周期不同，但上述顺序不可省略。特别是：
@@ -528,7 +562,7 @@ function request(method, path, headers, bytes):
 - 能发送和接收 SDP answer 以及 trickle ICE candidate。
 - 能处理 answer 之前到达的 candidate。
 - 能创建名为 `http` 的非 negotiated DataChannel。
-- 能编码任意二进制 body，且 Base64 解码后字节完全一致。
+- 能打包和解包二进制 packet 协议（4 字节大端 header 长度 + JSON header + 原始 body 字节），且二进制响应字节完全一致。
 - 能处理响应乱序、HTTP 非 2xx、空 body、二进制响应和 502 转发错误。
 - 能在 DataChannel、ICE、PeerConnection 或信令 WebSocket 断开后清理旧连接并完整重连。
 - 如果实现 WebSocket 转发，能正确区分文本帧、二进制帧、`socket_id`、协议和关闭码。

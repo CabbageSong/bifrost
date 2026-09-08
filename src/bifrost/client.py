@@ -160,7 +160,14 @@ class ServiceProxy:
                 for key, value in message.get("headers", {}).items()
                 if key.lower() not in ("host", "content-length")
             }
-            body = decode_body(message["body_base64"])
+            if "body" in message and isinstance(
+                message["body"], (bytes, bytearray, memoryview)
+            ):
+                body = bytes(message["body"])
+            elif "body_base64" in message:
+                body = decode_body(message["body_base64"])
+            else:
+                body = b""
             method = (message.get("method") or "GET").upper()
             async with self.session.request(
                 method,
@@ -173,12 +180,12 @@ class ServiceProxy:
                     request_id,
                     response.status,
                     dict(response.headers),
-                    encode_body(raw_body),
+                    body=raw_body,
                     status_text=response.reason or "",
                     response_url=response.url.raw_path_qs,
                 )
         except Exception as exc:
-            return http_response(request_id, 502, {}, "", error=str(exc))
+            return http_response(request_id, 502, {}, body=b"", error=str(exc))
 
     def _socket_key(self, message, reply):
         socket_id = message.get("socket_id")
@@ -257,7 +264,7 @@ class ServiceProxy:
                         "type": "websocket_message",
                         "socket_id": key[1],
                         "data_type": "binary",
-                        "data": encode_body(message.data),
+                        "body": message.data,
                     })
                 elif message.type == aiohttp.WSMsgType.ERROR:
                     await reply({
@@ -293,8 +300,18 @@ class ServiceProxy:
         data_type = message.get("data_type")
         if data_type == "text" and isinstance(message.get("data"), str):
             await entry[0].send_str(message["data"])
-        elif data_type == "binary" and isinstance(message.get("data"), str):
-            await entry[0].send_bytes(decode_body(message["data"]))
+        elif data_type == "binary":
+            if "body" in message and isinstance(
+                message["body"], (bytes, bytearray, memoryview)
+            ):
+                payload = bytes(message["body"])
+            elif isinstance(message.get("data"), (bytes, bytearray, memoryview)):
+                payload = bytes(message["data"])
+            elif isinstance(message.get("data"), str):
+                payload = decode_body(message["data"])
+            else:
+                raise ValueError("invalid websocket binary data")
+            await entry[0].send_bytes(payload)
         else:
             raise ValueError("invalid websocket message")
 

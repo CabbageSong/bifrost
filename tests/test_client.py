@@ -117,7 +117,7 @@ def test_service_proxy_forwards_common_http_methods(method, body):
                         "method": method,
                         "path": "/resource",
                         "headers": {"x-forwarded-test": "yes"},
-                        "body_base64": encode_body(body),
+                        "body": body,
                     },
                 )
         finally:
@@ -125,7 +125,7 @@ def test_service_proxy_forwards_common_http_methods(method, body):
 
         assert response["status"] == 200
         assert response["headers"]["x-request-method"] == method
-        assert decode_body(response["body_base64"]) == (
+        assert response["body"] == (
             body if method not in {"HEAD", "OPTIONS"} else b""
         )
 
@@ -160,7 +160,7 @@ def test_service_proxy_reuses_cookies_and_reports_redirect_url():
                         "method": "POST",
                         "path": "/login",
                         "headers": {},
-                        "body_base64": "",
+                        "body": b"",
                     },
                 )
                 account = await proxy_request(
@@ -171,15 +171,15 @@ def test_service_proxy_reuses_cookies_and_reports_redirect_url():
                         "method": "GET",
                         "path": "/account",
                         "headers": {},
-                        "body_base64": "",
+                        "body": b"",
                     },
                 )
         finally:
             await server.close()
 
         assert login["response_url"] == "/account"
-        assert decode_body(login["body_base64"]) == b"active"
-        assert decode_body(account["body_base64"]) == b"active"
+        assert login["body"] == b"active"
+        assert account["body"] == b"active"
 
     asyncio.run(scenario())
 
@@ -267,7 +267,7 @@ def test_service_proxy_relays_local_websocket_messages():
                         "type": "websocket_send",
                         "socket_id": "socket-1",
                         "data_type": "binary",
-                        "data": encode_body(b"abc"),
+                        "body": b"abc",
                     },
                     reply,
                 )
@@ -276,7 +276,7 @@ def test_service_proxy_relays_local_websocket_messages():
                     "type": "websocket_message",
                     "socket_id": "socket-1",
                     "data_type": "binary",
-                    "data": encode_body(b"cba"),
+                    "body": b"cba",
                 }
                 received.clear()
                 await proxy(
