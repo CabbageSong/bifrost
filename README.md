@@ -6,6 +6,7 @@ Bifrost 是一个通过 WebRTC DataChannel 访问内网 HTTP 服务的访问器�
 
 - `bifrost.server`：公网 HTTPS/WSS 信令服务器、room 入口和登录页面。
 - `bifrost.client`：内网端 agent，将 DataChannel 请求转换成普通 HTTP 请求。
+- `bifrost-curl`：无浏览器环境中的命令行访问器，通过 WebRTC DataChannel 转发 HTTP 请求。
 - `bifrost.protocol`：两端共用的消息格式与配置加载。
 - `examples/local-http`：纯 aiohttp HTTP 示例，不包含任何 Bifrost 代码。
 
@@ -86,6 +87,28 @@ ice_servers = []
 浏览器 iframe 中的超链接、表单提交、程序化页面跳转和 `fetch` 会被桥接到同一条 DataChannel。请求方法、请求头和请求体会传给内网 client，因此 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 及其他 aiohttp 接受的方法都可以转发；二进制请求体和响应体使用 Base64 保留原始字节。client 会为同一 WebRTC peer 复用 HTTP session，因此连接池和 Cookie 可以跨请求保留。
 
 HTML 中常见的样式表、脚本、图标、图片和媒体 `src` 会先经 DataChannel 读取，再以浏览器本地 Object URL 加载。iframe 中的 WebSocket 也会通过 DataChannel 连接到同一内网 service，支持文本帧、二进制帧、子协议和关闭事件。CSS 内部的 `url(...)`、`srcset`、同步 XHR 和流式 HTTP 请求目前不经过桥接。
+
+## 无浏览器命令行访问
+
+`bifrost-curl` 在没有浏览器的服务器、脚本或 CI 环境中充当浏览器端访问器。它会读取 room 页面中的 ICE 配置，完成 WebSocket 信令和 WebRTC DataChannel，然后把请求转发给已在线的内网 client：
+
+```bash
+bifrost-curl --server https://v.phenix.my:8443 --room home /healthz
+bifrost-curl --server https://v.phenix.my:8443 --room home \
+  -i -X POST -H 'Content-Type: application/json' \
+  --data-binary @payload.json /api/items
+```
+
+请求体默认输出到 stdout；`-i` 同时输出响应头，`-o FILE` 写入文件，`-k` 禁用 server TLS 校验，`-f` 在 HTTP 错误时返回退出码 22。`-d/--data` 会像 curl 一样默认使用 POST，并在未指定时添加 `application/x-www-form-urlencoded`；`--data-binary` 可用于原始或二进制文件。
+
+受密码保护的 room 会提示输入密码，也可以用于自动化：
+
+```bash
+printf '%s\n' 'room-password' | bifrost-curl --password-stdin \
+  --server https://v.phenix.my:8443 --room home /healthz
+```
+
+`bifrost-curl` 只替代浏览器端，不替代内网 client；对应 room 必须已经由 `bifrost-client` 注册。统一入口也支持 `bifrost curl ...`，并且可以使用 `python -m bifrost.curl ...`。
 
 ## Room 浏览器访问密码
 
@@ -260,6 +283,7 @@ python -m build
 ```bash
 bifrost-server --config /path/to/server.toml
 bifrost-client --config /path/to/client.toml
+bifrost-curl --server https://server.example --room home /healthz
 bifrost-hash-password
 ```
 

@@ -20,6 +20,7 @@ dependencies = [
 bifrost = "bifrost.__main__:main"
 bifrost-server = "bifrost.server:main"
 bifrost-client = "bifrost.client:cli"
+bifrost-curl = "bifrost.curl:cli"
 bifrost-hash-password = "bifrost.room_auth:main"
 
 [tool.setuptools]
