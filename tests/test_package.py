@@ -48,6 +48,10 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath))" in text
     assert "f.srcdoc=prepared" in text
     assert "window.WebSocket=ProxyWebSocket" in text
+    assert "onopen:null,onmessage:null,onerror:null,onclose:null" in text
+    assert "type='importmap'" in text
+    assert "loadModuleTree" in text
+    assert "raw.replace(/^about:(?:srcdoc\\/?)?/i,'')" in text
     assert "type:'websocket_open'" in text
     assert "type:'websocket_send'" in text
     assert "type:'websocket_close'" in text

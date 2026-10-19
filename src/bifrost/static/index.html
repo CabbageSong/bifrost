@@ -133,15 +133,23 @@ function frameHook(basePath){
     window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-response')return;var p=calls.get(e.data.requestId);if(!p)return;calls.delete(e.data.requestId);if(e.data.error)p.reject(Error(e.data.error));else p.resolve(e.data.response||{})});
     window.__bifrostNavigate=function(value){parent.postMessage({type:'bifrost-nav',href:toPath(value,true)},'*')};
     var socketNext=0,sockets=new Map();
-    function socketUrl(value){var raw=String(value),fallback='ws://bifrost.invalid'+BASE;if(/^wss?:\/\/\//i.test(raw))raw=raw.replace(/^(wss?):\/\/\//i,'$1://bifrost.invalid/');var u=new URL(raw,fallback);if(!/^wss?:$/.test(u.protocol))throw new DOMException('Unsupported WebSocket URL','SyntaxError');return u}
+    function socketUrl(value){
+      var raw=String(value);
+      if(/^about:/i.test(raw)){raw=raw.replace(/^about:(?:srcdoc\/?)?/i,'');if(!raw.startsWith('/'))raw='/'+raw}
+      var fallback='ws://bifrost.invalid'+BASE;
+      if(/^wss?:\/\/\//i.test(raw))raw=raw.replace(/^(wss?):\/\/\//i,'$1://bifrost.invalid/');
+      var u=new URL(raw,fallback);
+      if(!/^wss?:$/.test(u.protocol))throw new DOMException('Unsupported WebSocket URL','SyntaxError');
+      return u
+    }
     function socketProtocols(protocols){var list=protocols===undefined?[]:(Array.isArray(protocols)?protocols:[protocols]),seen=new Set();return list.map(function(value){value=String(value);if(!/^[!#$%&'*+\-.^_\x60|~0-9A-Za-z]+$/.test(value)||seen.has(value))throw new DOMException('Invalid WebSocket protocol','SyntaxError');seen.add(value);return value})}
     class ProxyWebSocket extends EventTarget{
-      constructor(url,protocols){super();var u=socketUrl(url),list=socketProtocols(protocols);this.url=u.href;this.readyState=ProxyWebSocket.CONNECTING;this.bufferedAmount=0;this.extensions='';this.protocol='';this.binaryType='blob';this._id=String(++socketNext);sockets.set(this._id,this);parent.postMessage({type:'bifrost-websocket',action:'open',socketId:this._id,url:u.href,protocols:list},'*')}
+      constructor(url,protocols){super();this.onopen=null;this.onmessage=null;this.onerror=null;this.onclose=null;var u=socketUrl(url),list=socketProtocols(protocols);this.url=u.href;this.readyState=ProxyWebSocket.CONNECTING;this.bufferedAmount=0;this.extensions='';this.protocol='';this.binaryType='blob';this._id=String(++socketNext);sockets.set(this._id,this);parent.postMessage({type:'bifrost-websocket',action:'open',socketId:this._id,url:u.href,protocols:list},'*')}
       _emit(type,event){this.dispatchEvent(event);var handler=this['on'+type];if(typeof handler==='function')handler.call(this,event)}
       send(data){if(this.readyState!==ProxyWebSocket.OPEN)throw new DOMException('WebSocket is not open','InvalidStateError');var self=this;if(typeof data==='string'){parent.postMessage({type:'bifrost-websocket',action:'send',socketId:this._id,data_type:'text',data:data},'*');return}var promise=data instanceof NativeBlob?data.arrayBuffer():data instanceof ArrayBuffer?Promise.resolve(data):ArrayBuffer.isView(data)?Promise.resolve(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength)):Promise.reject(new TypeError('Unsupported WebSocket message'));promise.then(function(buffer){if(self.readyState===ProxyWebSocket.OPEN)parent.postMessage({type:'bifrost-websocket',action:'send',socketId:self._id,data_type:'binary',data:new Uint8Array(buffer)},'*')}).catch(function(){self._emit('error',new Event('error'))})}
       close(code,reason){if(code!==undefined&&code!==1000&&!(code>=3000&&code<=4999))throw new DOMException('Invalid WebSocket close code','InvalidAccessError');reason=reason===undefined?'':String(reason);if(new TextEncoder().encode(reason).length>123)throw new DOMException('WebSocket close reason is too long','SyntaxError');if(this.readyState===ProxyWebSocket.CLOSED||this.readyState===ProxyWebSocket.CLOSING)return;this.readyState=ProxyWebSocket.CLOSING;parent.postMessage({type:'bifrost-websocket',action:'close',socketId:this._id,code:code===undefined?1000:code,reason:reason},'*')}
     }
-    Object.assign(ProxyWebSocket,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});Object.assign(ProxyWebSocket.prototype,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});window.WebSocket=ProxyWebSocket;
+    Object.assign(ProxyWebSocket,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3});Object.assign(ProxyWebSocket.prototype,{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3,onopen:null,onmessage:null,onerror:null,onclose:null});window.WebSocket=ProxyWebSocket;
     window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.type!=='bifrost-websocket-event')return;var m=e.data,socket=sockets.get(String(m.socketId));if(!socket)return;if(m.event==='open'){socket.readyState=ProxyWebSocket.OPEN;socket.protocol=m.protocol||'';socket._emit('open',new Event('open'))}else if(m.event==='message'){var data=m.data;if(m.data_type==='binary'){var raw=m.data;if(socket.binaryType==='arraybuffer')data=(raw.byteOffset===0&&raw.byteLength===raw.buffer.byteLength)?raw.buffer:raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength);else data=new NativeBlob([raw])}socket._emit('message',new MessageEvent('message',{data:data}))}else if(m.event==='error'){socket._emit('error',new Event('error'))}else if(m.event==='close'){socket.readyState=ProxyWebSocket.CLOSED;sockets.delete(socket._id);socket._emit('close',new CloseEvent('close',{code:m.code||1006,reason:m.reason||'',wasClean:(m.code||1006)!==1006}))}});
     window.fetch=function(input,init){
       init=init||{};var source=input instanceof NativeRequest?input:null,method=(init.method||(source&&source.method)||'GET').toUpperCase(),url=(source&&source.url)||input,h=headersObject(source&&source.headers);Object.assign(h,headersObject(init.headers));
@@ -165,11 +173,49 @@ function hasDownloadDisposition(response){return /(?:^|;)\s*attachment(?:\s*;|$)
 function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([response.body||new Uint8Array(0)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
 function isDownloadResponse(response,requested=''){let status=Number(response.status||0);return status>=200&&status<300&& (!!requested||hasDownloadDisposition(response))}
 function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(')}
+const IMPORT_RE=/\b(?:import|export)\s+(?:(?:[\w*\s{},]*?)\s+from\s+)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+function normRelPath(spec,baseNormPath){let u=new URL(spec,'http://bifrost.invalid'+(baseNormPath||currentPath));return u.pathname}
 async function prepareHtml(text){
-  let doc=new DOMParser().parseFromString(text,'text/html');
+  let doc=new DOMParser().parseFromString(text,'text/html'),moduleCache=new Map();
+  async function loadModuleTree(normPath){
+    if(moduleCache.has(normPath))return moduleCache.get(normPath);
+    let promise=(async()=>{
+      let res=await request('GET',normPath,{accept:'*/*'},null);
+      if(res.status<200||res.status>=300)throw Error('HTTP '+res.status);
+      let code=new TextDecoder().decode(res.body||new Uint8Array(0));
+      code=bridgeScript(code);
+      let matches=[...code.matchAll(IMPORT_RE)],children=[];
+      for(let m of matches){let s=m[1]||m[2];if(s.startsWith('.')||s.startsWith('/')){let childNorm=normRelPath(s,normPath);children.push({raw:m[0],spec:s,childNorm})}}
+      await Promise.all(children.map(c=>loadModuleTree(c.childNorm)));
+      for(let c of children){let bare='@bifrost'+c.childNorm;code=code.replaceAll(c.raw,c.raw.replace(c.spec,bare))}
+      let dataUrl='data:text/javascript;base64,'+base64ForBytes(new TextEncoder().encode(code));
+      return {path:normPath,bare:'@bifrost'+normPath,dataUrl}
+    })();
+    moduleCache.set(normPath,promise);
+    return promise
+  }
+  let moduleScripts=[...doc.querySelectorAll('script[type="module"]')];
+  await Promise.all(moduleScripts.map(async node=>{
+    if(node.hasAttribute('src')){
+      let targetPath=pathFor(node.getAttribute('src'));
+      try{let info=await loadModuleTree(normRelPath(targetPath,currentPath));node.setAttribute('src',info.dataUrl);node.removeAttribute('integrity');node.removeAttribute('crossorigin')}catch(err){warn('module proxy failed',{url:targetPath,message:err.message})}
+    }else{
+      let code=bridgeScript(node.textContent||'');
+      let matches=[...code.matchAll(IMPORT_RE)],children=[];
+      for(let m of matches){let s=m[1]||m[2];if(s.startsWith('.')||s.startsWith('/')){let childNorm=normRelPath(s,currentPath);children.push({raw:m[0],spec:s,childNorm})}}
+      await Promise.all(children.map(c=>loadModuleTree(c.childNorm)));
+      for(let c of children){let bare='@bifrost'+c.childNorm;code=code.replaceAll(c.raw,c.raw.replace(c.spec,bare))}
+      node.textContent=code
+    }
+  }));
+  if(moduleCache.size>0){
+    let importMap={imports:{}};
+    for(let [p,pPromise] of moduleCache){let info=await pPromise;importMap.imports[info.bare]=info.dataUrl;importMap.imports[p]=info.dataUrl;if(p.startsWith('/'))importMap.imports['.'+p]=info.dataUrl}
+    let mapScript=doc.createElement('script');mapScript.type='importmap';mapScript.textContent=JSON.stringify(importMap);doc.head.insertAdjacentElement('afterbegin',mapScript)
+  }
   doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath));
-  doc.querySelectorAll('script:not([src])').forEach(node=>{node.textContent=bridgeScript(node.textContent||'')});
-  let assets=[...doc.querySelectorAll('script[src],link[rel~="stylesheet"][href],link[rel~="icon"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
+  doc.querySelectorAll('script:not([src]):not([type="module"])').forEach(node=>{node.textContent=bridgeScript(node.textContent||'')});
+  let assets=[...doc.querySelectorAll('script[src]:not([type="module"]),link[rel~="stylesheet"][href],link[rel~="icon"][href],link[rel~="apple-touch-icon"][href],link[rel="preload"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
   await Promise.all(assets.map(async node=>{
     let attribute=node.hasAttribute('src')?'src':node.hasAttribute('poster')?'poster':'href',value=node.getAttribute(attribute);
     try{
