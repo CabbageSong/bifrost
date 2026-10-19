@@ -57,6 +57,9 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "type:'websocket_close'" in text
     assert "window.__bifrostNavigate" in text
     assert "location\\s*\\." in text
+    assert "class ProxyURL extends NativeURL" in text
+    assert "window.URL=ProxyURL" in text
+    assert "Object.defineProperty(document,'location'" in text
 
 
 def test_static_page_bridges_browser_downloads():

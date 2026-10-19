@@ -96,6 +96,60 @@ function frameHook(basePath){
     var BASE=${JSON.stringify(basePath)},calls=new Map(),next=0;
     var NativeRequest=window.Request,NativeResponse=window.Response,NativeFetch=window.fetch;
     var NativeURLSearchParams=window.URLSearchParams,NativeFormData=window.FormData,NativeBlob=window.Blob;
+    var NativeURL=window.URL;
+    function resolveBase(base){
+      if(base===undefined)return undefined;
+      var b=String(base&&base.href!==undefined?base.href:base);
+      var fallback='http://bifrost.invalid'+BASE,tag=document.querySelector('base[href]');
+      if(tag)try{fallback=new NativeURL(tag.getAttribute('href'),fallback).href}catch(_){}
+      if(/^about:/i.test(b)||b==='null'||!b)return fallback;
+      if(!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(b)){
+        try{return new NativeURL(b,fallback).href}catch(_){}
+      }
+      return base
+    }
+    class ProxyURL extends NativeURL{
+      constructor(url,base){
+        if(base===undefined&&!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(String(url))){
+          base=resolveBase('')
+        }
+        if(base!==undefined){
+          super(url,resolveBase(base))
+        }else{
+          super(url)
+        }
+      }
+    }
+    if(typeof NativeURL.canParse==='function'){
+      ProxyURL.canParse=function(url,base){
+        if(base===undefined&&!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(String(url))){
+          base=resolveBase('')
+        }
+        return NativeURL.canParse(url,base!==undefined?resolveBase(base):undefined)
+      }
+    }
+    window.URL=ProxyURL;
+    try{
+      var virtualUrl=new NativeURL('http://bifrost.invalid'+BASE);
+      var fakeLoc={
+        get href(){return virtualUrl.href},
+        set href(val){window.__bifrostNavigate(val)},
+        get search(){return virtualUrl.search},
+        get hash(){return virtualUrl.hash},
+        set hash(val){var h=String(val);if(h&&!h.startsWith('#'))h='#'+h;virtualUrl.hash=h;window.__bifrostNavigate(virtualUrl.pathname+virtualUrl.search+virtualUrl.hash)},
+        get pathname(){return virtualUrl.pathname},
+        get host(){return virtualUrl.host},
+        get hostname(){return virtualUrl.hostname},
+        get port(){return virtualUrl.port},
+        get protocol(){return virtualUrl.protocol},
+        get origin(){return virtualUrl.origin},
+        assign:function(url){window.__bifrostNavigate(url)},
+        replace:function(url){window.__bifrostNavigate(url)},
+        reload:function(){window.__bifrostNavigate(BASE)},
+        toString:function(){return virtualUrl.href}
+      };
+      Object.defineProperty(document,'location',{get:function(){return fakeLoc},set:function(val){window.__bifrostNavigate(val)},configurable:true})
+    }catch(_){}
     function headersObject(h){var o={};if(!h)return o;if(h.forEach)h.forEach(function(v,k){o[k]=v});else if(Array.isArray(h))h.forEach(function(x){o[x[0]]=x[1]});else Object.keys(h).forEach(function(k){o[k]=h[k]});return o}
     function hasHeader(h,name){name=name.toLowerCase();return Object.keys(h).some(function(k){return k.toLowerCase()===name})}
     function toPath(value,includeHash){var fallback='http://bifrost.invalid'+BASE,b=document.querySelector('base[href]'),base=fallback;if(b)try{base=new URL(b.getAttribute('href'),fallback).href}catch(_){}var u=new URL(String(value),base),path=u.pathname+u.search;if(!/^https?:$/.test(u.protocol))throw Error('不支持的 URL 协议');return includeHash?path+u.hash:path}
