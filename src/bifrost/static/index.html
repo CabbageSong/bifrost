@@ -160,7 +160,36 @@ function frameHook(basePath){
         reload:function(){window.__bifrostNavigate(BASE)},
         toString:function(){return virtualUrl.href}
       };
+      window.__bifrostLocation=fakeLoc;
       Object.defineProperty(document,'location',{get:function(){return fakeLoc},set:function(val){window.__bifrostNavigate(val)},configurable:true})
+    }catch(_){}
+    function MemoryStorage(){this._s=new Map()}
+    MemoryStorage.prototype={
+      getItem:function(k){return this._s.has(String(k))?this._s.get(String(k)):null},
+      setItem:function(k,v){this._s.set(String(k),String(v))},
+      removeItem:function(k){this._s.delete(String(k))},
+      clear:function(){this._s.clear()},
+      key:function(i){return Array.from(this._s.keys())[i]||null},
+      get length(){return this._s.size}
+    };
+    var fakeLocalStorage=new MemoryStorage(),fakeSessionStorage=new MemoryStorage();
+    try{Object.defineProperty(window,'localStorage',{value:fakeLocalStorage,writable:true,configurable:true})}catch(_){try{window.localStorage=fakeLocalStorage}catch(_){}}
+    try{Object.defineProperty(window,'sessionStorage',{value:fakeSessionStorage,writable:true,configurable:true})}catch(_){try{window.sessionStorage=fakeSessionStorage}catch(_){}}
+    var cookieStore=new Map();
+    try{
+      Object.defineProperty(document,'cookie',{
+        get:function(){
+          if(window.__APP_CONFIG__&&window.__APP_CONFIG__.csrfToken&&!cookieStore.has('csrfToken')){
+            cookieStore.set('csrfToken',window.__APP_CONFIG__.csrfToken);
+          }
+          var pairs=[];cookieStore.forEach(function(v,k){pairs.push(k+'='+v)});return pairs.join('; ');
+        },
+        set:function(val){
+          var str=String(val||'').split(';',1)[0].trim(),eq=str.indexOf('=');
+          if(eq>0){var k=str.slice(0,eq).trim(),v=str.slice(eq+1).trim();if(k)cookieStore.set(k,v)}
+        },
+        configurable:true
+      });
     }catch(_){}
     function headersObject(h){var o={};if(!h)return o;if(h.forEach)h.forEach(function(v,k){o[k]=v});else if(Array.isArray(h))h.forEach(function(x){o[x[0]]=x[1]});else Object.keys(h).forEach(function(k){o[k]=h[k]});return o}
     function hasHeader(h,name){name=name.toLowerCase();return Object.keys(h).some(function(k){return k.toLowerCase()===name})}
@@ -238,7 +267,7 @@ function downloadName(response,requested,path){let fromHeader=dispositionFilenam
 function hasDownloadDisposition(response){return /(?:^|;)\s*attachment(?:\s*;|$)/i.test(headerValue(response.headers,'content-disposition'))}
 function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([response.body||new Uint8Array(0)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
 function isDownloadResponse(response,requested=''){let status=Number(response.status||0);return status>=200&&status<300&& (!!requested||hasDownloadDisposition(response))}
-function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(').replace(/\bwindow\s*\.\s*location\b/g,'document.location')}
+function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(').replace(/\bwindow\s*\.\s*location\b/g,'(window.__bifrostLocation||document.location)')}
 const IMPORT_RE=/\b(?:import|export)\s+(?:(?:[\w*\s{},]*?)\s+from\s+)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 function normRelPath(spec,baseNormPath){let u=new URL(spec,'http://bifrost.invalid'+(baseNormPath||currentPath));return u.pathname}
 async function prepareHtml(text){
@@ -279,8 +308,8 @@ async function prepareHtml(text){
     for(let [p,pPromise] of moduleCache){let info=await pPromise;importMap.imports[info.bare]=info.dataUrl;importMap.imports[p]=info.dataUrl;if(p.startsWith('/'))importMap.imports['.'+p]=info.dataUrl}
     let mapScript=doc.createElement('script');mapScript.type='importmap';mapScript.textContent=JSON.stringify(importMap);doc.head.insertAdjacentElement('afterbegin',mapScript)
   }
-  doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath));
   doc.querySelectorAll('script:not([src]):not([type="module"])').forEach(node=>{node.textContent=bridgeScript(node.textContent||'')});
+  doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath));
   let assets=[...doc.querySelectorAll('script[src]:not([type="module"]),link[rel~="stylesheet"][href],link[rel~="icon"][href],link[rel~="apple-touch-icon"][href],link[rel="preload"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
   await Promise.all(assets.map(async node=>{
     let attribute=node.hasAttribute('src')?'src':node.hasAttribute('poster')?'poster':'href',value=node.getAttribute(attribute);
