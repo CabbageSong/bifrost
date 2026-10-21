@@ -173,6 +173,51 @@ function frameHook(basePath){
         toString:function(){return virtualUrl.href}
       };
       window.__bifrostLocation=fakeLoc;
+      try{
+        var fakeWindow=new Proxy(window,{
+          get:function(target,prop,receiver){
+            if(prop==='location')return fakeLoc;
+            var val=Reflect.get(target,prop);
+            if(typeof val==='function')return val.bind(target);
+            return val
+          }
+        });
+        window.__bifrostWindow=fakeWindow;
+      }catch(_){}
+      var _origPushState=history.pushState,_origReplaceState=history.replaceState;
+      var _currentState=history.state;
+      history.pushState=function(state,title,url){
+        _currentState=state;
+        try{_origPushState.call(history,state,title)}catch(_){try{_origPushState.call(history,state,title,null)}catch(__){}}
+        if(url){
+          try{
+            var nextUrl=new NativeURL(String(url),virtualUrl.href);
+            virtualUrl.pathname=nextUrl.pathname;
+            virtualUrl.search=nextUrl.search;
+            virtualUrl.hash=nextUrl.hash;
+            parent.postMessage({type:'bifrost-history',action:'push',href:virtualUrl.pathname+virtualUrl.search+virtualUrl.hash},'*');
+          }catch(_){}
+        }
+      };
+      history.replaceState=function(state,title,url){
+        _currentState=state;
+        try{_origReplaceState.call(history,state,title)}catch(_){try{_origReplaceState.call(history,state,title,null)}catch(__){}}
+        if(url){
+          try{
+            var nextUrl=new NativeURL(String(url),virtualUrl.href);
+            virtualUrl.pathname=nextUrl.pathname;
+            virtualUrl.search=nextUrl.search;
+            virtualUrl.hash=nextUrl.hash;
+            parent.postMessage({type:'bifrost-history',action:'replace',href:virtualUrl.pathname+virtualUrl.search+virtualUrl.hash},'*');
+          }catch(_){}
+        }
+      };
+      try{
+        Object.defineProperty(history,'state',{
+          get:function(){return _currentState!==undefined?_currentState:null},
+          configurable:true
+        });
+      }catch(_){}
       Object.defineProperty(document,'location',{get:function(){return fakeLoc},set:function(val){window.__bifrostNavigate(val)},configurable:true})
     }catch(_){}
     function MemoryStorage(){this._s=new Map()}
@@ -279,7 +324,7 @@ function downloadName(response,requested,path){let fromHeader=dispositionFilenam
 function hasDownloadDisposition(response){return /(?:^|;)\s*attachment(?:\s*;|$)/i.test(headerValue(response.headers,'content-disposition'))}
 function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([response.body||new Uint8Array(0)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
 function isDownloadResponse(response,requested=''){let status=Number(response.status||0);return status>=200&&status<300&& (!!requested||hasDownloadDisposition(response))}
-function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(').replace(/\bwindow\s*\.\s*location\b/g,'(window.__bifrostLocation||document.location)')}
+function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(').replace(/\bwindow\s*\.\s*location\b/g,'(window.__bifrostLocation||document.location)').replace(/typeof\s+document\s*!==\s*['"]undefined['"]\s*\?\s*window\s*:\s*void\s*0/g,'typeof document!=="undefined"?(window.__bifrostWindow||window):void 0')}
 const IMPORT_RE=/\b(?:import|export)\s+(?:(?:[\w*\s{},]*?)\s+from\s+)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 function normRelPath(spec,baseNormPath){let u=new URL(spec,'http://bifrost.invalid'+(baseNormPath||currentPath));return u.pathname}
 async function prepareHtml(text){
@@ -326,6 +371,7 @@ async function prepareHtml(text){
   let assets=[...doc.querySelectorAll('script[src]:not([type="module"]),link[rel~="stylesheet"][href],link[rel~="icon"][href],link[rel~="apple-touch-icon"][href],link[rel="preload"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
   await Promise.all(assets.map(async node=>{
     let attribute=node.hasAttribute('src')?'src':node.hasAttribute('poster')?'poster':'href',value=node.getAttribute(attribute);
+    if(!value||/^(?:data|blob):/i.test(value))return;
     try{
       let response=await request('GET',pathFor(value),{accept:'*/*','accept-encoding':'gzip'},null);
       if(response.status<200||response.status>=300)throw Error('HTTP '+response.status);
@@ -371,6 +417,22 @@ window.onmessage=async e=>{
   if(!e.data||!frame||e.source!==frame.contentWindow)return;
   let source=e.source,q=e.data;
   if(q.type==='bifrost-debug'){warn('iframe '+q.level,q);return}
+  if(q.type==='bifrost-history'){
+    let href=q.href||'/';
+    try{
+      let p=pathFor(href);
+      currentPath=p;
+      if(q.action==='push'){
+        historyPaths=historyPaths.slice(0,historyIndex+1);
+        if(historyPaths.at(-1)!==p)historyPaths.push(p);
+        historyIndex=historyPaths.length-1;
+      }else if(q.action==='replace'){
+        historyPaths[historyIndex]=p;
+      }
+      setAddr(p);
+    }catch(_){}
+    return;
+  }
   if(q.type==='bifrost-nav'){let href=q.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}
   if(q.type==='bifrost-download-data'){try{triggerDownload({headers:{'content-type':q.contentType||''},body:q.data||new Uint8Array(0)},q.filename||'','');st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
   if(q.type==='bifrost-download-error'){st('下载失败','bad',q.error||'无法读取下载内容');return}
