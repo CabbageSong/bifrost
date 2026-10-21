@@ -604,9 +604,18 @@ def create_app(cfg):
     app[LOGIN_LIMITER] = LoginLimiter(attempts, window)
     app[PASSWORD_WORKERS] = asyncio.Semaphore(workers)
     app[ICE_SERVERS] = ice_servers
+    async def debug_log(request):
+        try:
+            body = await request.text()
+            log.warning("CLIENT_LOG: %s", body[:3000])
+        except Exception:
+            pass
+        return web.Response(text="ok")
+
     app.router.add_get("/signal", signal)
     app.router.add_get("/server-healthz", health)
     app.router.add_post("/_bifrost/login", login)
+    app.router.add_post("/_bifrost/debug", debug_log)
     app.router.add_get("/", portal)
     app.router.add_get("/{tail:.*}", page)
     return app

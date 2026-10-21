@@ -42,10 +42,11 @@ const $=x=>document.getElementById(x);
 function st(x,c='',detail=''){let status=$('status');status.textContent=x;status.className=c;status.title=detail}
 function setAddr(p){$('addr').value=p}
 function send(x){if(ws&&ws.readyState===1)ws.send(JSON.stringify(x))}
-function debug(event,details){let prefix='[Bifrost '+connectionId+']';if(details===undefined)console.info(prefix,event);else console.info(prefix,event,details)}
-function warn(event,details){console.warn('[Bifrost '+connectionId+']',event,details)}
-window.addEventListener('error',event=>warn('window error',{message:event.message,filename:event.filename,lineno:event.lineno,colno:event.colno}));
-window.addEventListener('unhandledrejection',event=>warn('unhandled promise rejection',{reason:event.reason&&event.reason.message||String(event.reason)}));
+function sendDebug(obj){try{fetch('/_bifrost/debug',{method:'POST',body:JSON.stringify(obj)}).catch(()=>{})}catch(_){}}
+function debug(event,details){let prefix='[Bifrost '+connectionId+']';if(details===undefined)console.info(prefix,event);else console.info(prefix,event,details);sendDebug({level:'info',connectionId,event,details})}
+function warn(event,details){console.warn('[Bifrost '+connectionId+']',event,details);sendDebug({level:'warn',connectionId,event,details})}
+window.addEventListener('error',event=>warn('window error',{message:event.message,filename:event.filename,lineno:event.lineno,colno:event.colno,stack:event.error&&event.error.stack}));
+window.addEventListener('unhandledrejection',event=>warn('unhandled promise rejection',{reason:event.reason&&event.reason.message||String(event.reason),stack:event.reason&&event.reason.stack}));
 function safeIceServers(servers){return servers.map(server=>({urls:server.urls,username:server.username?'configured':undefined,credential:server.credential?'configured':undefined}))}
 function candidateDetails(candidate){
   if(!candidate)return null;
@@ -94,6 +95,12 @@ function pathFor(value){
 function frameHook(basePath){
   const code=String.raw`(function(){
     var BASE=${JSON.stringify(basePath)},calls=new Map(),next=0;
+    try{parent.postMessage({type:'bifrost-debug',level:'info',source:'iframe',message:'frameHook init',base:BASE},'*')}catch(_){}
+    window.addEventListener('error',function(e){try{parent.postMessage({type:'bifrost-debug',level:'error',source:'iframe',message:e.message,filename:e.filename,lineno:e.lineno,colno:e.colno,stack:e.error&&e.error.stack},'*')}catch(_){}});
+    window.addEventListener('unhandledrejection',function(e){try{parent.postMessage({type:'bifrost-debug',level:'unhandledrejection',source:'iframe',reason:e.reason&&e.reason.message||String(e.reason),stack:e.reason&&e.reason.stack},'*')}catch(_){}});
+    var _origWarn=console.warn,_origErr=console.error;
+    console.warn=function(){try{_origWarn.apply(console,arguments)}catch(_){}try{var s=[];for(var i=0;i<arguments.length;i++)s.push(typeof arguments[i]==='object'?JSON.stringify(arguments[i]):String(arguments[i]));parent.postMessage({type:'bifrost-debug',level:'warn',source:'iframe',message:s.join(' ')},'*')}catch(_){}};
+    console.error=function(){try{_origErr.apply(console,arguments)}catch(_){}try{var s=[];for(var i=0;i<arguments.length;i++)s.push(typeof arguments[i]==='object'?JSON.stringify(arguments[i]):String(arguments[i]));parent.postMessage({type:'bifrost-debug',level:'error',source:'iframe',message:s.join(' ')},'*')}catch(_){}};
     var NativeRequest=window.Request,NativeResponse=window.Response,NativeFetch=window.fetch;
     var NativeURLSearchParams=window.URLSearchParams,NativeFormData=window.FormData,NativeBlob=window.Blob;
     var NativeURL=window.URL;
@@ -299,12 +306,20 @@ async function prepareHtml(text){
   return '<!doctype html>'+doc.documentElement.outerHTML
 }
 function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(encodePacket({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
-async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{let downloaded=await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},null));if(dc&&dc.readyState==='open')st(downloaded?'下载已开始':'已连接 · '+connectionId,'ok')}catch(e){if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
+async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{let downloaded=await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*'},null));if(dc&&dc.readyState==='open')st(downloaded?'下载已开始':'已连接 · '+connectionId,'ok')}catch(e){warn('navigate error',{path,message:e.message,stack:e.stack});if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
 async function render(r,requested=''){
   if(isDownloadResponse(r,requested)){triggerDownload(r,requested,r.response_url||currentPath);return true}
   let ct=headerValue(r.headers,'content-type').toLowerCase(),text=new TextDecoder().decode(r.body||new Uint8Array(0));
   closeAppSockets();frameSerial++;
-  if(ct.includes('text/html')){let prepared=await prepareHtml(text),f=document.createElement('iframe');f.sandbox='allow-scripts allow-forms';frame=f;f.srcdoc=prepared;view.replaceChildren(f)}
+  if(ct.includes('text/html')){
+    debug('render html start',{length:text.length});
+    let prepared=await prepareHtml(text),f=document.createElement('iframe');
+    f.sandbox='allow-scripts allow-forms';
+    frame=f;
+    f.srcdoc=prepared;
+    view.replaceChildren(f);
+    debug('render html done',{preparedLength:prepared.length});
+  }
   else{let p=document.createElement('pre');p.textContent=text;view.replaceChildren(p);frame=null}
   return false
 }
@@ -313,6 +328,7 @@ function failTransport(){for(let [id,p] of pending){p.no(Error('WebRTC 数据通
 window.onmessage=async e=>{
   if(!e.data||!frame||e.source!==frame.contentWindow)return;
   let source=e.source,q=e.data;
+  if(q.type==='bifrost-debug'){warn('iframe '+q.level,q);return}
   if(q.type==='bifrost-nav'){let href=q.href||'/';if(/^(javascript:|data:|mailto:|tel:)/i.test(href))return;try{navigate(pathFor(href))}catch(_){};return}
   if(q.type==='bifrost-download-data'){try{triggerDownload({headers:{'content-type':q.contentType||''},body:q.data||new Uint8Array(0)},q.filename||'','');st('下载已开始','ok')}catch(error){st('下载失败','bad',error.message)}return}
   if(q.type==='bifrost-download-error'){st('下载失败','bad',q.error||'无法读取下载内容');return}
