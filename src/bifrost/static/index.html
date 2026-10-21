@@ -134,7 +134,12 @@ function frameHook(basePath){
       var fakeLoc={
         get href(){return virtualUrl.href},
         set href(val){window.__bifrostNavigate(val)},
-        get search(){return virtualUrl.search},
+        get search(){
+          var s=virtualUrl.search;
+          if(!s)return '?useWebSocket=true';
+          if(!/[?&]useWebSocket=/i.test(s))return s+'&useWebSocket=true';
+          return s
+        },
         get hash(){return virtualUrl.hash},
         set hash(val){var h=String(val);if(h&&!h.startsWith('#'))h='#'+h;virtualUrl.hash=h;window.__bifrostNavigate(virtualUrl.pathname+virtualUrl.search+virtualUrl.hash)},
         get pathname(){return virtualUrl.pathname},
@@ -226,7 +231,7 @@ function downloadName(response,requested,path){let fromHeader=dispositionFilenam
 function hasDownloadDisposition(response){return /(?:^|;)\s*attachment(?:\s*;|$)/i.test(headerValue(response.headers,'content-disposition'))}
 function triggerDownload(response,requested,path){let type=headerValue(response.headers,'content-type').split(';',1)[0]||'application/octet-stream',blob=new Blob([response.body||new Uint8Array(0)],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(response,requested,path);a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1000)}
 function isDownloadResponse(response,requested=''){let status=Number(response.status||0);return status>=200&&status<300&& (!!requested||hasDownloadDisposition(response))}
-function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(')}
+function bridgeScript(source){return source.replace(/\b(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)\s*\(/g,'window.__bifrostNavigate(').replace(/\bwindow\s*\.\s*location\b/g,'document.location')}
 const IMPORT_RE=/\b(?:import|export)\s+(?:(?:[\w*\s{},]*?)\s+from\s+)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 function normRelPath(spec,baseNormPath){let u=new URL(spec,'http://bifrost.invalid'+(baseNormPath||currentPath));return u.pathname}
 async function prepareHtml(text){
@@ -277,9 +282,18 @@ async function prepareHtml(text){
       if(response.status<200||response.status>=300)throw Error('HTTP '+response.status);
       let type=headerValue(response.headers,'content-type')||((node.tagName==='SCRIPT')?'text/javascript':'application/octet-stream');
       let body=response.body;
-      if(node.tagName==='SCRIPT')body=new TextEncoder().encode(bridgeScript(new TextDecoder().decode(body)));
-      // Blob URLs belong to the parent origin and are blocked by the opaque sandbox.
-      node.setAttribute(attribute,'data:'+type.split(';',1)[0]+';base64,'+base64ForBytes(body));node.removeAttribute('integrity');node.removeAttribute('crossorigin')
+      if(node.tagName==='SCRIPT'){
+        node.removeAttribute('src');
+        node.textContent=bridgeScript(new TextDecoder().decode(body));
+      }else if(node.tagName==='LINK'&&(node.getAttribute('rel')||'').includes('stylesheet')){
+        let style=doc.createElement('style');
+        style.textContent=new TextDecoder().decode(body);
+        node.replaceWith(style);
+      }else{
+        // Blob URLs belong to the parent origin and are blocked by the opaque sandbox.
+        node.setAttribute(attribute,'data:'+type.split(';',1)[0]+';base64,'+base64ForBytes(body));
+      }
+      node.removeAttribute('integrity');node.removeAttribute('crossorigin')
     }catch(error){node.removeAttribute(attribute);warn('subresource proxy failed',{url:value,message:error.message})}
   }));
   return '<!doctype html>'+doc.documentElement.outerHTML

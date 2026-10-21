@@ -60,6 +60,9 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "class ProxyURL extends NativeURL" in text
     assert "window.URL=ProxyURL" in text
     assert "Object.defineProperty(document,'location'" in text
+    assert "node.removeAttribute('src')" in text
+    assert "node.textContent=bridgeScript" in text
+    assert "useWebSocket=true" in text
 
 
 def test_static_page_bridges_browser_downloads():
