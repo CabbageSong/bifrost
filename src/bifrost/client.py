@@ -358,7 +358,8 @@ async def run(cfg):
 
     async def run_service(room, target, service_cfg):
         async with aiohttp.ClientSession(
-            cookie_jar=aiohttp.CookieJar(unsafe=True)
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
+            auto_decompress=False,
         ) as session:
             log.info("registering room=%s target=%s", room, target)
             await serve_agent(

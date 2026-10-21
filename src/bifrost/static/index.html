@@ -88,6 +88,7 @@ function request(method,path,headers={},body=null,timeoutMs=120000){
 
 async function decompressBody(body,encoding){
   if(!body||!body.length||!encoding||!encoding.includes('gzip'))return body;
+  if(body.length<2||body[0]!==0x1f||body[1]!==0x8b)return body;
   if(typeof DecompressionStream!=='undefined'){
     try{
       let buf=await new Response(new Blob([body]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
