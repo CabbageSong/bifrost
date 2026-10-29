@@ -205,11 +205,12 @@ function frameHook(basePath){
         });
         window.__bifrostWindow=fakeWindow;
       }catch(_){}
-      var _origPushState=history.pushState,_origReplaceState=history.replaceState;
+      var _origPushState=(typeof History!=='undefined'&&History.prototype&&History.prototype.pushState)||history.pushState;
+      var _origReplaceState=(typeof History!=='undefined'&&History.prototype&&History.prototype.replaceState)||history.replaceState;
       var _currentState=history.state;
-      history.pushState=function(state,title,url){
+      function bifrostPushState(state,title,url){
         _currentState=state;
-        try{_origPushState.call(history,state,title)}catch(_){try{_origPushState.call(history,state,title,null)}catch(__){}}
+        try{_origPushState.call(this,state,title)}catch(_){try{_origPushState.call(this,state,title,null)}catch(__){}}
         if(url){
           try{
             var nextUrl=new NativeURL(String(url),virtualUrl.href);
@@ -219,10 +220,10 @@ function frameHook(basePath){
             parent.postMessage({type:'bifrost-history',action:'push',href:virtualUrl.pathname+virtualUrl.search+virtualUrl.hash},'*');
           }catch(_){}
         }
-      };
-      history.replaceState=function(state,title,url){
+      }
+      function bifrostReplaceState(state,title,url){
         _currentState=state;
-        try{_origReplaceState.call(history,state,title)}catch(_){try{_origReplaceState.call(history,state,title,null)}catch(__){}}
+        try{_origReplaceState.call(this,state,title)}catch(_){try{_origReplaceState.call(this,state,title,null)}catch(__){}}
         if(url){
           try{
             var nextUrl=new NativeURL(String(url),virtualUrl.href);
@@ -232,12 +233,28 @@ function frameHook(basePath){
             parent.postMessage({type:'bifrost-history',action:'replace',href:virtualUrl.pathname+virtualUrl.search+virtualUrl.hash},'*');
           }catch(_){}
         }
-      };
+      }
+      try{
+        if(typeof History!=='undefined'&&History.prototype){
+          History.prototype.pushState=bifrostPushState;
+          History.prototype.replaceState=bifrostReplaceState;
+        }
+      }catch(_){}
+      try{
+        history.pushState=bifrostPushState;
+        history.replaceState=bifrostReplaceState;
+      }catch(_){}
       try{
         Object.defineProperty(history,'state',{
           get:function(){return _currentState!==undefined?_currentState:null},
           configurable:true
         });
+        if(typeof History!=='undefined'&&History.prototype){
+          Object.defineProperty(History.prototype,'state',{
+            get:function(){return _currentState!==undefined?_currentState:null},
+            configurable:true
+          });
+        }
       }catch(_){}
       Object.defineProperty(document,'location',{get:function(){return fakeLoc},set:function(val){window.__bifrostNavigate(val)},configurable:true})
     }catch(_){}
