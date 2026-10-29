@@ -160,6 +160,16 @@ function frameHook(basePath){
     }
     window.URL=ProxyURL;
     try{
+      var getBaseURI=function(){return resolveBase('')};
+      if(typeof Document!=='undefined'&&Document.prototype){
+        try{Object.defineProperty(Document.prototype,'baseURI',{get:getBaseURI,configurable:true})}catch(_){}
+      }
+      if(typeof Node!=='undefined'&&Node.prototype){
+        try{Object.defineProperty(Node.prototype,'baseURI',{get:getBaseURI,configurable:true})}catch(_){}
+      }
+      try{Object.defineProperty(document,'baseURI',{get:getBaseURI,configurable:true})}catch(_){}
+    }catch(_){}
+    try{
       var virtualUrl=new NativeURL('http://bifrost.invalid'+BASE);
       var fakeLoc={
         get href(){return virtualUrl.href},
