@@ -325,38 +325,6 @@ function frameHook(basePath){
       }
     }catch(_){}
     try{
-      var _origCreateElement=document.createElement;
-      document.createElement=function(tagName,options){
-        var el=_origCreateElement.call(document,tagName,options);
-        if(typeof tagName==='string'&&tagName.toLowerCase()==='script'){
-          var _origSetAttribute=el.setAttribute,_scriptSrc='';
-          el.setAttribute=function(name,val){
-            if(name&&name.toLowerCase()==='src'){el.src=val;return}
-            return _origSetAttribute.apply(this,arguments);
-          };
-          Object.defineProperty(el,'src',{
-            get:function(){return _scriptSrc},
-            set:function(val){
-              _scriptSrc=String(val||'');
-              if(_scriptSrc&&!_scriptSrc.startsWith('blob:')&&!_scriptSrc.startsWith('data:')&&!/^(?:https?:)?\/\//i.test(_scriptSrc)){
-                var p=toPath(_scriptSrc);
-                ask('GET',p,{accept:'*/*'},null,false).then(function(res){
-                  if(res.status>=200&&res.status<300){
-                    var b=new NativeBlob([res.body||new Uint8Array(0)],{type:'text/javascript'});
-                    var blobUrl=URL.createObjectURL(b);
-                    _origSetAttribute.call(el,'src',blobUrl);
-                    el.addEventListener('load',function(){try{URL.revokeObjectURL(blobUrl)}catch(_){}},{once:true});
-                  }else{el.dispatchEvent(new Event('error'))}
-                }).catch(function(){el.dispatchEvent(new Event('error'))});
-              }else{_origSetAttribute.call(el,'src',_scriptSrc)}
-            },
-            configurable:true
-          });
-        }
-        return el;
-      };
-    }catch(_){}
-    try{
       window.__DSH_TRANSPORT__={
         streamBaseUrl:'http://bifrost.invalid'+BASE,
         loadBundle:function(url){
