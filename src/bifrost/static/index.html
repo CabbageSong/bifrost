@@ -472,8 +472,9 @@ async function prepareHtml(text){
     let mapScript=doc.createElement('script');mapScript.type='importmap';mapScript.textContent=JSON.stringify(importMap);doc.head.insertAdjacentElement('afterbegin',mapScript)
   }
   doc.querySelectorAll('script:not([src]):not([type="module"])').forEach(node=>{node.textContent=bridgeScript(node.textContent||'')});
+  doc.querySelectorAll('link[rel~="preload"],link[rel~="modulepreload"]').forEach(node=>node.remove());
   doc.head.insertAdjacentHTML('afterbegin',frameHook(currentPath));
-  let assets=[...doc.querySelectorAll('script[src]:not([type="module"]),link[rel~="stylesheet"][href],link[rel~="icon"][href],link[rel~="apple-touch-icon"][href],link[rel="preload"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
+  let assets=[...doc.querySelectorAll('script[src]:not([type="module"]),link[rel~="stylesheet"][href],link[rel~="icon"][href],link[rel~="apple-touch-icon"][href],img[src],source[src],audio[src],video[poster],input[type="image"][src]')];
   await Promise.all(assets.map(async node=>{
     let attribute=node.hasAttribute('src')?'src':node.hasAttribute('poster')?'poster':'href',value=node.getAttribute(attribute);
     if(!value||/^(?:data|blob):/i.test(value))return;
