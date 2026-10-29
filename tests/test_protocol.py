@@ -1,11 +1,13 @@
 import pytest
 
 from bifrost.protocol import (
+    CHUNK_SIZE,
     decode_body,
     decode_packet,
     default_config_path,
     encode_body,
     encode_packet,
+    http_chunk,
     http_response,
     resolve_config_path,
     validate_ice_servers,
@@ -141,3 +143,25 @@ def test_packet_encoding_strips_body_base64_and_handles_none_body():
     assert "body_base64" not in decoded_header
     assert decoded_header == {"type": "http_response", "id": 3}
     assert decoded_body == b""
+
+
+def test_chunked_http_response_and_chunk_helpers():
+    resp = http_response(10, 200, {"content-type": "text/plain"}, chunked=True, total_size=100000)
+    assert resp["type"] == "http_response"
+    assert resp["chunked"] is True
+    assert resp["total_size"] == 100000
+    assert resp["body"] == b""
+
+    chunk = http_chunk(10, 0, eof=False, body=b"hello")
+    assert chunk["type"] == "http_chunk"
+    assert chunk["id"] == 10
+    assert chunk["seq"] == 0
+    assert chunk["eof"] is False
+    assert chunk["body"] == b"hello"
+
+    last_chunk = http_chunk(10, 1, eof=True, body=b"world")
+    assert last_chunk["eof"] is True
+    assert last_chunk["body"] == b"world"
+
+    err_chunk = http_chunk(10, 2, error="connection reset")
+    assert err_chunk["error"] == "connection reset"

@@ -2,6 +2,7 @@ import asyncio
 from io import BytesIO
 
 from bifrost import curl
+from bifrost.protocol import encode_packet
 
 
 def test_parse_page_config_supports_nested_ice_entries():
@@ -105,3 +106,30 @@ def test_curl_run_rejects_two_password_sources():
         assert str(exc) == "--password and --password-stdin cannot be used together"
     else:
         raise AssertionError("expected conflicting password options to fail")
+
+
+def test_curl_channel_message_reassembles_chunked_response():
+    client = curl.BifrostHTTPClient("http://127.0.0.1:8443", "home")
+    loop = asyncio.new_event_loop()
+    future = loop.create_future()
+    client._responses[1] = future
+
+    client._on_channel_message(
+        encode_packet({"type": "http_response", "id": 1, "status": 200, "chunked": True}, b"")
+    )
+    assert not future.done()
+
+    client._on_channel_message(
+        encode_packet({"type": "http_chunk", "id": 1, "seq": 0, "eof": False}, b"part1_")
+    )
+    assert not future.done()
+
+    client._on_channel_message(
+        encode_packet({"type": "http_chunk", "id": 1, "seq": 1, "eof": True}, b"part2")
+    )
+    assert future.done()
+    header, body = future.result()
+    assert header["type"] == "http_response"
+    assert header["status"] == 200
+    assert body == b"part1_part2"
+    loop.close()

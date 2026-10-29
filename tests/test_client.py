@@ -456,3 +456,51 @@ def test_configured_services_rejects_duplicate_rooms():
 def test_configured_services_rejects_invalid_port():
     with pytest.raises(ValueError, match='invalid local_port'):
         configured_services(config([{'room': 'home', 'local_port': 70000}]))
+
+
+def test_service_proxy_chunks_large_responses():
+    async def scenario():
+        large_body = b"x" * (100 * 1024)  # 100 KiB
+
+        async def handler(request):
+            return web.Response(body=large_body, content_type="application/octet-stream")
+
+        app = web.Application()
+        app.router.add_get("/large", handler)
+        server = TestServer(app)
+        await server.start_server()
+
+        replies = []
+
+        async def reply(msg, body=None):
+            replies.append((msg, body))
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                proxy = ServiceProxy(str(server.make_url("/")), session)
+                await proxy(
+                    {
+                        "type": "http_request",
+                        "id": "req-large",
+                        "method": "GET",
+                        "path": "/large",
+                    },
+                    reply,
+                )
+        finally:
+            await server.close()
+
+        assert len(replies) > 1
+        header_reply, header_body = replies[0]
+        assert header_reply["type"] == "http_response"
+        assert header_reply["chunked"] is True
+        assert header_reply["total_size"] == len(large_body)
+
+        chunks = []
+        for msg, body in replies[1:]:
+            assert msg["type"] == "http_chunk"
+            chunks.append(msg.get("body") if body is None else body)
+        assert replies[-1][0]["eof"] is True
+        assert b"".join(chunks) == large_body
+
+    asyncio.run(scenario())

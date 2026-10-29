@@ -12,8 +12,10 @@ from yarl import URL
 
 from .agent import load_identity, serve_agent
 from .protocol import (
+    CHUNK_SIZE,
     decode_body,
     encode_body,
+    http_chunk,
     http_response,
     load_config,
     resolve_config_path,
@@ -140,7 +142,7 @@ class ServiceProxy:
     async def __call__(self, message, reply):
         message_type = message.get("type")
         if message_type == "http_request":
-            await reply(await self._proxy_http(message))
+            await self._proxy_http(message, reply)
         elif message_type == "websocket_open":
             await reply(await self._open_websocket(message, reply))
         elif message_type == "websocket_send":
@@ -150,7 +152,7 @@ class ServiceProxy:
         else:
             raise ValueError("unsupported proxy message type")
 
-    async def _proxy_http(self, message):
+    async def _proxy_http(self, message, reply):
         request_id = message.get("id")
         try:
             path = message.get("path") or "/"
@@ -176,16 +178,47 @@ class ServiceProxy:
                 data=body or None,
             ) as response:
                 raw_body = await response.read()
-                return http_response(
-                    request_id,
-                    response.status,
-                    dict(response.headers),
-                    body=raw_body,
-                    status_text=response.reason or "",
-                    response_url=response.url.raw_path_qs,
+                if len(raw_body) <= CHUNK_SIZE:
+                    await reply(
+                        http_response(
+                            request_id,
+                            response.status,
+                            dict(response.headers),
+                            body=raw_body,
+                            status_text=response.reason or "",
+                            response_url=response.url.raw_path_qs,
+                        )
+                    )
+                    return
+
+                await reply(
+                    http_response(
+                        request_id,
+                        response.status,
+                        dict(response.headers),
+                        body=b"",
+                        status_text=response.reason or "",
+                        response_url=response.url.raw_path_qs,
+                        chunked=True,
+                        total_size=len(raw_body),
+                    )
                 )
+                for i in range(0, len(raw_body), CHUNK_SIZE):
+                    chunk = raw_body[i : i + CHUNK_SIZE]
+                    is_last = (i + CHUNK_SIZE >= len(raw_body))
+                    seq = i // CHUNK_SIZE
+                    await reply(
+                        http_chunk(
+                            request_id,
+                            seq,
+                            eof=is_last,
+                            body=chunk,
+                        )
+                    )
+                    if seq % 8 == 0:
+                        await asyncio.sleep(0.001)
         except Exception as exc:
-            return http_response(request_id, 502, {}, body=b"", error=str(exc))
+            await reply(http_response(request_id, 502, {}, body=b"", error=str(exc)))
 
     def _socket_key(self, message, reply):
         socket_id = message.get("socket_id")

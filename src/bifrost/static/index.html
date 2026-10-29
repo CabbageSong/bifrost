@@ -528,7 +528,40 @@ async function connect(){
       }catch(error){warn('signaling message failed',{message:error.message})}
     };
     localDc=localPc.createDataChannel('http');localDc.binaryType='arraybuffer';dc=localDc;
-    localDc.onmessage=e=>{if(generation!==transportGeneration)return;let header,body;if(e.data instanceof ArrayBuffer){let p=decodePacket(e.data);header=p.header;body=p.body}else{header=JSON.parse(e.data);body=header.body_base64?bytesFor(header.body_base64):(header.data_type==='binary'&&typeof header.data==='string')?bytesFor(header.data):new Uint8Array(0)}if(String(header.type||'').startsWith('websocket_')){deliverSocketEvent(header,body);return}let p=pending.get(header.id);if(p){pending.delete(header.id);header.error?p.no(Error(header.error)):p.ok({status:header.status,status_text:header.status_text||'',headers:header.headers||{},response_url:header.response_url||'',body})}};
+    localDc.onmessage=e=>{
+      if(generation!==transportGeneration)return;
+      let header,body;
+      if(e.data instanceof ArrayBuffer){
+        let p=decodePacket(e.data);
+        header=p.header;body=p.body
+      }else{
+        header=JSON.parse(e.data);
+        body=header.body_base64?bytesFor(header.body_base64):(header.data_type==='binary'&&typeof header.data==='string')?bytesFor(header.data):new Uint8Array(0)
+      }
+      if(String(header.type||'').startsWith('websocket_')){deliverSocketEvent(header,body);return}
+      let p=pending.get(header.id);
+      if(!p)return;
+      if(header.type==='http_chunk'){
+        if(!p.res)return;
+        if(header.error){pending.delete(header.id);p.no(Error(header.error));return}
+        p.res.chunks.push(body);
+        p.res.len+=body.length;
+        if(header.eof){
+          pending.delete(header.id);
+          let full=new Uint8Array(p.res.len),off=0;
+          for(let c of p.res.chunks){full.set(c,off);off+=c.length}
+          p.ok({status:p.res.status,status_text:p.res.status_text,headers:p.res.headers,response_url:p.res.response_url,body:full})
+        }
+        return;
+      }
+      if(header.error){pending.delete(header.id);p.no(Error(header.error));return}
+      if(header.chunked){
+        p.res={status:header.status,status_text:header.status_text||'',headers:header.headers||{},response_url:header.response_url||'',chunks:[],len:0};
+        return;
+      }
+      pending.delete(header.id);
+      p.ok({status:header.status,status_text:header.status_text||'',headers:header.headers||{},response_url:header.response_url||'',body})
+    };
     localDc.onopen=async()=>{if(generation!==transportGeneration)return;debug('data channel open',{label:localDc.label,id:localDc.id});connecting=false;reconnectAttempt=0;clearTimeout(connectTimer);connectTimer=null;st('已连接 · '+connectionId,'ok');await dumpPeerStats('data channel open');if(generation===transportGeneration)await navigate(currentPath,false)};
     localDc.onclose=()=>{debug('data channel closed',{label:localDc.label,id:localDc.id});transportLost('data channel closed',generation)};
     localDc.onerror=event=>warn('data channel error',{type:event.type});

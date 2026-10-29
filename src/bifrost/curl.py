@@ -191,8 +191,9 @@ class BifrostHTTPClient:
 
     async def close(self):
         """Close the DataChannel, signaling WebSocket and HTTP session."""
-        for future in self._responses.values():
-            if not future.done():
+        for item in self._responses.values():
+            future = item if isinstance(item, asyncio.Future) else item.get("future")
+            if future is not None and not future.done():
                 future.set_exception(BifrostCurlError("Bifrost connection closed"))
         self._responses.clear()
         if self._signal_task is not None:
@@ -354,8 +355,43 @@ class BifrostHTTPClient:
         except (TypeError, ValueError, json.JSONDecodeError):
             return
         response = self._responses.get(request_id)
-        if response is not None and not response.done():
-            response.set_result((header, body))
+        if response is None:
+            return
+
+        msg_type = header.get("type")
+        if msg_type == "http_response":
+            if header.get("error"):
+                future = response if isinstance(response, asyncio.Future) else response.get("future")
+                if future is not None and not future.done():
+                    future.set_exception(BifrostCurlError(header["error"]))
+                return
+
+            if header.get("chunked"):
+                future = response if isinstance(response, asyncio.Future) else response.get("future")
+                self._responses[request_id] = {
+                    "future": future,
+                    "header": header,
+                    "chunks": [],
+                }
+                return
+
+            future = response if isinstance(response, asyncio.Future) else response.get("future")
+            if future is not None and not future.done():
+                future.set_result((header, body))
+
+        elif msg_type == "http_chunk":
+            if not isinstance(response, dict):
+                return
+            future = response.get("future")
+            if header.get("error"):
+                if future is not None and not future.done():
+                    future.set_exception(BifrostCurlError(header["error"]))
+                return
+            response["chunks"].append(body)
+            if header.get("eof"):
+                full_body = b"".join(response["chunks"])
+                if future is not None and not future.done():
+                    future.set_result((response["header"], full_body))
 
 
 def _parse_headers(values):

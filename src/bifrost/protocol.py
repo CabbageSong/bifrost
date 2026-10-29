@@ -183,6 +183,9 @@ def decode_packet(data: bytes) -> tuple[dict, bytes]:
     return header, body
 
 
+CHUNK_SIZE = 32 * 1024
+
+
 def http_response(
     request_id,
     status,
@@ -192,6 +195,8 @@ def http_response(
     error=None,
     status_text="",
     response_url="",
+    chunked=False,
+    total_size=None,
 ):
     result = {
         "type": "http_response",
@@ -200,12 +205,29 @@ def http_response(
         "headers": headers,
         "body": body,
     }
+    if chunked:
+        result["chunked"] = True
+    if total_size is not None:
+        result["total_size"] = total_size
     if body_base64 is not None:
         result["body_base64"] = body_base64
     if status_text:
         result["status_text"] = status_text
     if response_url:
         result["response_url"] = response_url
+    if error:
+        result["error"] = error
+    return result
+
+
+def http_chunk(request_id, seq, eof=False, body=b"", error=None):
+    result = {
+        "type": "http_chunk",
+        "id": request_id,
+        "seq": seq,
+        "eof": eof,
+        "body": body,
+    }
     if error:
         result["error"] = error
     return result
