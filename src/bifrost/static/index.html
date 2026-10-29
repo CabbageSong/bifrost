@@ -110,9 +110,20 @@ function frameHook(basePath){
     try{parent.postMessage({type:'bifrost-debug',level:'info',source:'iframe',message:'frameHook init',base:BASE},'*')}catch(_){}
     window.addEventListener('error',function(e){try{parent.postMessage({type:'bifrost-debug',level:'error',source:'iframe',message:e.message,filename:e.filename,lineno:e.lineno,colno:e.colno,stack:e.error&&e.error.stack},'*')}catch(_){}});
     window.addEventListener('unhandledrejection',function(e){try{parent.postMessage({type:'bifrost-debug',level:'unhandledrejection',source:'iframe',reason:e.reason&&e.reason.message||String(e.reason),stack:e.reason&&e.reason.stack},'*')}catch(_){}});
+    function _fmt(x){
+      if(!x)return String(x);
+      if(x instanceof Error)return (x.stack||x.message||String(x));
+      if(typeof x==='object'){
+        try{
+          var j=JSON.stringify(x,Object.getOwnPropertyNames(x));
+          return j==='{}'?String(x):j
+        }catch(_){return String(x)}
+      }
+      return String(x)
+    }
     var _origWarn=console.warn,_origErr=console.error;
-    console.warn=function(){try{_origWarn.apply(console,arguments)}catch(_){}try{var s=[];for(var i=0;i<arguments.length;i++)s.push(typeof arguments[i]==='object'?JSON.stringify(arguments[i]):String(arguments[i]));parent.postMessage({type:'bifrost-debug',level:'warn',source:'iframe',message:s.join(' ')},'*')}catch(_){}};
-    console.error=function(){try{_origErr.apply(console,arguments)}catch(_){}try{var s=[];for(var i=0;i<arguments.length;i++)s.push(typeof arguments[i]==='object'?JSON.stringify(arguments[i]):String(arguments[i]));parent.postMessage({type:'bifrost-debug',level:'error',source:'iframe',message:s.join(' ')},'*')}catch(_){}};
+    console.warn=function(){try{_origWarn.apply(console,arguments)}catch(_){}try{var s=[];for(var i=0;i<arguments.length;i++)s.push(_fmt(arguments[i]));parent.postMessage({type:'bifrost-debug',level:'warn',source:'iframe',message:s.join(' ')},'*')}catch(_){}};
+    console.error=function(){try{_origErr.apply(console,arguments)}catch(_){}try{var s=[];for(var i=0;i<arguments.length;i++)s.push(_fmt(arguments[i]));parent.postMessage({type:'bifrost-debug',level:'error',source:'iframe',message:s.join(' ')},'*')}catch(_){}};
     var NativeRequest=window.Request,NativeResponse=window.Response,NativeFetch=window.fetch;
     var NativeURLSearchParams=window.URLSearchParams,NativeFormData=window.FormData,NativeBlob=window.Blob;
     var NativeURL=window.URL;
@@ -232,6 +243,14 @@ function frameHook(basePath){
     var fakeLocalStorage=new MemoryStorage(),fakeSessionStorage=new MemoryStorage();
     try{Object.defineProperty(window,'localStorage',{value:fakeLocalStorage,writable:true,configurable:true})}catch(_){try{window.localStorage=fakeLocalStorage}catch(_){}}
     try{Object.defineProperty(window,'sessionStorage',{value:fakeSessionStorage,writable:true,configurable:true})}catch(_){try{window.sessionStorage=fakeSessionStorage}catch(_){}}
+    if(typeof Window!=='undefined'&&Window.prototype){
+      try{Object.defineProperty(Window.prototype,'localStorage',{get:function(){return fakeLocalStorage},configurable:true})}catch(_){}
+      try{Object.defineProperty(Window.prototype,'sessionStorage',{get:function(){return fakeSessionStorage},configurable:true})}catch(_){}
+      try{
+        var _hasIdb=false;try{_hasIdb=!!window.indexedDB}catch(_){}
+        if(!_hasIdb){Object.defineProperty(Window.prototype,'indexedDB',{get:function(){return null},configurable:true})}
+      }catch(_){}
+    }
     var cookieStore=new Map();
     try{
       Object.defineProperty(document,'cookie',{
@@ -254,6 +273,30 @@ function frameHook(basePath){
     function ask(method,url,headers,body,navigate){
       return new Promise(function(resolve,reject){var id=++next;calls.set(id,{resolve:resolve,reject:reject});parent.postMessage({type:'bifrost-request',requestId:id,method:method||'GET',url:toPath(url),headers:headersObject(headers),body:body,navigate:!!navigate},'*')})
     }
+    try{
+      if(window.AudioWorklet&&window.AudioWorklet.prototype&&window.AudioWorklet.prototype.addModule){
+        var _origAddModule=window.AudioWorklet.prototype.addModule;
+        window.AudioWorklet.prototype.addModule=function(moduleUrl,options){
+          var self=this;
+          try{
+            var p=toPath(moduleUrl);
+            return ask('GET',p,{accept:'*/*'},null,false).then(function(res){
+              if(res.status<200||res.status>=300)throw Error('HTTP '+res.status);
+              var b=new NativeBlob([res.body||new Uint8Array(0)],{type:'text/javascript'});
+              var u=URL.createObjectURL(b);
+              return _origAddModule.call(self,u,options).finally(function(){
+                try{URL.revokeObjectURL(u)}catch(_){}
+              });
+            }).catch(function(err){
+              try{parent.postMessage({type:'bifrost-debug',level:'warn',source:'iframe',message:'AudioWorklet addModule fallback: '+(err.message||err)},'*')}catch(_){}
+              return Promise.resolve();
+            });
+          }catch(_){
+            return Promise.resolve();
+          }
+        };
+      }
+    }catch(_){}
     function payload(body){
       if(body===undefined||body===null)return Promise.resolve({body:new Uint8Array(0),contentType:null});
       if(typeof body==='string')return Promise.resolve({body:new TextEncoder().encode(body),contentType:null});
@@ -490,12 +533,33 @@ async function connect(){
     localWs=new WebSocket(wsScheme+location.host+'/signal?role=client&room='+encodeURIComponent(room));ws=localWs;
     await new Promise((ok,no)=>{
       localWs.onopen=()=>{opened=true;ok()};
-      localWs.onerror=event=>{warn('signaling websocket error',{type:event.type});if(!opened)no(Error('信令服务器连接失败'))};
+      localWs.onerror=event=>{
+        warn('signaling websocket error',{type:event.type});
+        if(!opened){
+          try{
+            fetch(location.href,{method:'HEAD',cache:'no-store'}).then(res=>{
+              if(res.status===401){
+                sessionEnded=true;
+                teardownTransport(generation);
+                st('登录已失效，正在跳转...','bad');
+                setTimeout(()=>location.reload(),500);
+              }
+            }).catch(()=>{});
+          }catch(_){}
+          no(Error('信令服务器连接失败'))
+        }
+      };
       localWs.onclose=event=>{
         debug('signaling websocket closed',{code:event.code,reason:event.reason,wasClean:event.wasClean});
         if(!opened)no(Error(event.reason||'信令服务器连接已关闭'));
         if(generation!==transportGeneration)return;
-        if(bifrostConfig.protected&&event.code===1008){sessionEnded=true;teardownTransport(generation);st('会话已结束','bad','请刷新页面重新登录。');return}
+        if(bifrostConfig.protected&&event.code===1008){
+          sessionEnded=true;
+          teardownTransport(generation);
+          st('会话已结束，正在刷新页面...','bad');
+          setTimeout(()=>location.reload(),500);
+          return
+        }
         transportLost('signaling websocket closed',generation)
       }
     });

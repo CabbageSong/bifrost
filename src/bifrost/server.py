@@ -12,6 +12,7 @@ import ssl
 import time
 from collections import defaultdict, deque
 from importlib.resources import files
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
@@ -599,7 +600,21 @@ def create_app(cfg):
     app = web.Application(client_max_size=64 * 1024)
     app[AUTHORIZED_KEYS] = load_authorized_keys(auth["public_keys"])
     app[AUTH_TIMEOUT] = float(auth["timeout"])
-    app[SESSION_SECRET] = os.urandom(32)
+    secret_path = Path.home() / ".config" / "bifrost" / ".session_secret"
+    session_secret = None
+    try:
+        if secret_path.is_file():
+            raw_secret = secret_path.read_bytes()
+            if len(raw_secret) == 32:
+                session_secret = raw_secret
+        if session_secret is None:
+            session_secret = os.urandom(32)
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            secret_path.write_bytes(session_secret)
+            secret_path.chmod(0o600)
+    except OSError:
+        session_secret = os.urandom(32)
+    app[SESSION_SECRET] = session_secret
     app[SESSION_TTL] = session_ttl
     app[LOGIN_LIMITER] = LoginLimiter(attempts, window)
     app[PASSWORD_WORKERS] = asyncio.Semaphore(workers)
