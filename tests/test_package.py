@@ -63,6 +63,9 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "node.removeAttribute('src')" in text
     assert "node.textContent=bridgeScript" in text
     assert "useWebSocket=true" in text
+    assert "History.prototype.replaceState" in text
+    assert "History.prototype.pushState" in text
+    assert "IMPORT_RE" in text
 
 
 def test_static_page_bridges_browser_downloads():
