@@ -66,6 +66,9 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "History.prototype.replaceState" in text
     assert "History.prototype.pushState" in text
     assert "IMPORT_RE" in text
+    assert "await decompressBody(r.body,enc)" in text
+    assert "__DSH_TRANSPORT__" in text
+    assert "loadBundle" in text
 
 
 def test_static_page_bridges_browser_downloads():

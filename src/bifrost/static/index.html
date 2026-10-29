@@ -87,13 +87,22 @@ function request(method,path,headers={},body=null,timeoutMs=120000){
 }
 
 async function decompressBody(body,encoding){
-  if(!body||!body.length||!encoding||!encoding.includes('gzip'))return body;
-  if(body.length<2||body[0]!==0x1f||body[1]!==0x8b)return body;
-  if(typeof DecompressionStream!=='undefined'){
-    try{
-      let buf=await new Response(new Blob([body]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
-      return new Uint8Array(buf)
-    }catch(err){warn('decompress failed',{message:err.message})}
+  if(!body||!body.length||!encoding)return body;
+  let enc=encoding.toLowerCase();
+  if(enc.includes('gzip')&&body.length>=2&&body[0]===0x1f&&body[1]===0x8b){
+    if(typeof DecompressionStream!=='undefined'){
+      try{
+        let buf=await new Response(new Blob([body]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+        return new Uint8Array(buf)
+      }catch(err){warn('decompress gzip failed',{message:err.message})}
+    }
+  }else if(enc.includes('deflate')){
+    if(typeof DecompressionStream!=='undefined'){
+      try{
+        let buf=await new Response(new Blob([body]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+        return new Uint8Array(buf)
+      }catch(err){warn('decompress deflate failed',{message:err.message})}
+    }
   }
   return body
 }
@@ -331,14 +340,23 @@ function frameHook(basePath){
           var p=toPath(url);
           return ask('GET',p,{accept:'*/*'},null,false).then(function(res){
             if(res.status<200||res.status>=300)throw Error('HTTP '+res.status);
-            var b=new NativeBlob([res.body||new Uint8Array(0)],{type:'text/javascript'});
-            var blobUrl=URL.createObjectURL(b);
-            var script=document.createElement('script');
-            script.src=blobUrl;
-            return new Promise(function(resolve,reject){
-              script.onload=function(){try{URL.revokeObjectURL(blobUrl)}catch(_){};script.remove();resolve()};
-              script.onerror=function(err){try{URL.revokeObjectURL(blobUrl)}catch(_){};script.remove();reject(err||Error('bundle load error'))};
-              document.head.appendChild(script);
+            var body=res.body||new Uint8Array(0);
+            var processBody=Promise.resolve(body);
+            if(body.length>=2&&body[0]===0x1f&&body[1]===0x8b&&typeof DecompressionStream!=='undefined'){
+              try{
+                processBody=new Response(new Blob([body]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer().then(function(buf){return new Uint8Array(buf)}).catch(function(){return body});
+              }catch(_){}
+            }
+            return processBody.then(function(finalBody){
+              var b=new NativeBlob([finalBody],{type:'text/javascript'});
+              var blobUrl=URL.createObjectURL(b);
+              var script=document.createElement('script');
+              script.src=blobUrl;
+              return new Promise(function(resolve,reject){
+                script.onload=function(){try{URL.revokeObjectURL(blobUrl)}catch(_){};script.remove();resolve()};
+                script.onerror=function(err){try{URL.revokeObjectURL(blobUrl)}catch(_){};script.remove();reject(err||Error('bundle load error'))};
+                document.head.appendChild(script);
+              });
             });
           });
         }
@@ -543,7 +561,30 @@ window.onmessage=async e=>{
     return
   }
   if(q.type!=='bifrost-request')return;
-  try{let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body);if(q.navigate){if(await render(r))return;p=r.response_url||p;currentPath=p;historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==p)historyPaths.push(p);historyIndex=historyPaths.length-1;setAddr(p);return}source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*')}catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
+  try{
+    let p=pathFor(q.url||'/'),r=await request(q.method||'GET',p,q.headers||{},q.body);
+    if(q.navigate){
+      if(await render(r))return;
+      p=r.response_url||p;
+      currentPath=p;
+      historyPaths=historyPaths.slice(0,historyIndex+1);
+      if(historyPaths.at(-1)!==p)historyPaths.push(p);
+      historyIndex=historyPaths.length-1;
+      setAddr(p);
+      return;
+    }
+    let enc=headerValue(r.headers,'content-encoding');
+    if(enc){
+      r.body=await decompressBody(r.body,enc);
+      let newHeaders={};
+      for(let [k,v] of Object.entries(r.headers||{})){
+        let kl=k.toLowerCase();
+        if(kl!=='content-encoding'&&kl!=='content-length')newHeaders[k]=v;
+      }
+      r.headers=newHeaders;
+    }
+    source.postMessage({type:'bifrost-response',requestId:q.requestId,response:r},'*');
+  }catch(err){source.postMessage({type:'bifrost-response',requestId:q.requestId,error:err.message},'*')}
 };
 $('go').onclick=()=>{let v=$('addr').value.trim();try{navigate(pathFor(v||'/'))}catch(_){}};$('addr').onkeydown=e=>{if(e.key==='Enter')$('go').click()};$('back').onclick=()=>{if(historyIndex){historyIndex--;navigate(historyPaths[historyIndex],false)}};$('forward').onclick=()=>{if(historyIndex+1<historyPaths.length){historyIndex++;navigate(historyPaths[historyIndex],false)}};$('refresh').onclick=()=>{if(dc&&dc.readyState==='open')navigate(currentPath,false);else reconnectNow('refresh requested')};setAddr(currentPath);
 function teardownTransport(generation){
