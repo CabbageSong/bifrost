@@ -69,6 +69,10 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "await decompressBody(r.body,enc)" in text
     assert "__DSH_TRANSPORT__" in text
     assert "loadBundle" in text
+    assert "hookMediaSrc" in text
+    assert "readBlobAsDataUrl" in text
+    assert "blobStore" in text
+    assert "HTMLMediaElement.prototype" in text
 
 
 def test_static_page_bridges_browser_downloads():

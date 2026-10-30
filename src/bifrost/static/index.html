@@ -167,7 +167,142 @@ function frameHook(basePath){
         return NativeURL.canParse(url,base!==undefined?resolveBase(base):undefined)
       }
     }
+    var _origCreateObjectURL=NativeURL.createObjectURL,_origRevokeObjectURL=NativeURL.revokeObjectURL;
+    var blobStore=new Map();
+    function bifrostCreateObjectURL(blob){
+      var url=_origCreateObjectURL.call(NativeURL,blob);
+      try{
+        if(blob&&typeof blob==='object'){
+          if(blobStore.size>=200){
+            var firstKey=blobStore.keys().next().value;
+            if(firstKey!==undefined)blobStore.delete(firstKey);
+          }
+          blobStore.set(url,blob);
+        }
+      }catch(_){}
+      return url
+    }
+    function bifrostRevokeObjectURL(url){
+      try{blobStore.delete(url)}catch(_){}
+      return _origRevokeObjectURL.call(NativeURL,url)
+    }
+    ProxyURL.createObjectURL=NativeURL.createObjectURL=bifrostCreateObjectURL;
+    ProxyURL.revokeObjectURL=NativeURL.revokeObjectURL=bifrostRevokeObjectURL;
     window.URL=ProxyURL;
+    try{window.URL.createObjectURL=bifrostCreateObjectURL}catch(_){}
+    try{window.URL.revokeObjectURL=bifrostRevokeObjectURL}catch(_){}
+    function isBlobUrl(url){
+      return typeof url==='string'&&/^blob:/i.test(url.trim())
+    }
+    function readBlobAsDataUrl(blob){
+      return new Promise(function(resolve,reject){
+        var fr=new FileReader();
+        fr.onload=function(){resolve(fr.result)};
+        fr.onerror=function(){reject(fr.error)};
+        try{fr.readAsDataURL(blob)}catch(err){reject(err)}
+      });
+    }
+    function hookMediaSrc(proto){
+      if(!proto)return;
+      var desc=Object.getOwnPropertyDescriptor(proto,'src');
+      var p=proto;
+      while(!desc&&p){
+        desc=Object.getOwnPropertyDescriptor(p,'src');
+        p=Object.getPrototypeOf(p);
+      }
+      var origGet=desc&&desc.get;
+      var origSet=desc&&desc.set;
+      var origSetAttr=Element.prototype.setAttribute;
+      var origGetAttr=Element.prototype.getAttribute;
+      var origHasAttr=Element.prototype.hasAttribute;
+      var origRemAttr=Element.prototype.removeAttribute;
+      Object.defineProperty(proto,'src',{
+        get:function(){
+          if(this._bifrostSrc!==undefined)return this._bifrostSrc;
+          return origGet?origGet.call(this):(this.getAttribute('src')||'')
+        },
+        set:function(val){
+          var self=this;
+          var sVal=String(val!==null&&val!==undefined?val:'');
+          self._bifrostSrc=sVal;
+          if(isBlobUrl(sVal)){
+            var blob=blobStore.get(sVal);
+            var p=blob?Promise.resolve(blob):NativeFetch(sVal).then(function(r){return r.blob()}).catch(function(){return null});
+            p.then(function(b){
+              if(!b){
+                if(origSet)origSet.call(self,sVal);
+                else origSetAttr.call(self,'src',sVal);
+                return;
+              }
+              return readBlobAsDataUrl(b).then(function(dataUrl){
+                if(self._bifrostSrc===sVal){
+                  if(origSet)origSet.call(self,dataUrl);
+                  else{
+                    origSetAttr.call(self,'src',dataUrl);
+                    try{if(typeof self.load==='function')self.load()}catch(_){}
+                  }
+                }
+              });
+            }).catch(function(err){
+              try{parent.postMessage({type:'bifrost-debug',level:'warn',source:'iframe',message:'readBlobAsDataUrl failed: '+String(err)},'*')}catch(_){}
+              if(origSet)origSet.call(self,sVal);
+              else origSetAttr.call(self,'src',sVal);
+            });
+            return;
+          }
+          if(origSet){
+            origSet.call(self,val);
+          }else{
+            origSetAttr.call(self,'src',val);
+          }
+        },
+        configurable:true,
+        enumerable:true
+      });
+      proto.setAttribute=function(name,val){
+        if(String(name).toLowerCase()==='src'){
+          this.src=val;
+          return;
+        }
+        return origSetAttr.call(this,name,val);
+      };
+      proto.getAttribute=function(name){
+        if(String(name).toLowerCase()==='src'&&this._bifrostSrc!==undefined){
+          return this._bifrostSrc;
+        }
+        return origGetAttr.call(this,name);
+      };
+      proto.hasAttribute=function(name){
+        if(String(name).toLowerCase()==='src'&&this._bifrostSrc!==undefined){
+          return true;
+        }
+        return origHasAttr.call(this,name);
+      };
+      proto.removeAttribute=function(name){
+        if(String(name).toLowerCase()==='src'){
+          delete this._bifrostSrc;
+        }
+        return origRemAttr.call(this,name);
+      };
+    }
+    try{
+      if(typeof HTMLMediaElement!=='undefined')hookMediaSrc(HTMLMediaElement.prototype);
+      if(typeof HTMLVideoElement!=='undefined'&&Object.prototype.hasOwnProperty.call(HTMLVideoElement.prototype,'src'))hookMediaSrc(HTMLVideoElement.prototype);
+      if(typeof HTMLAudioElement!=='undefined'&&Object.prototype.hasOwnProperty.call(HTMLAudioElement.prototype,'src'))hookMediaSrc(HTMLAudioElement.prototype);
+      if(typeof HTMLSourceElement!=='undefined')hookMediaSrc(HTMLSourceElement.prototype);
+    }catch(_){}
+    try{
+      if(typeof Audio!=='undefined'){
+        var NativeAudio=Audio;
+        var ProxyAudio=function(src){
+          var a=new NativeAudio();
+          if(src!==undefined)a.src=src;
+          return a;
+        };
+        ProxyAudio.prototype=NativeAudio.prototype;
+        window.Audio=ProxyAudio;
+      }
+    }catch(_){}
     try{
       var getBaseURI=function(){return resolveBase('')};
       if(typeof Document!=='undefined'&&Document.prototype){
