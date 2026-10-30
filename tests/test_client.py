@@ -206,7 +206,7 @@ def test_service_proxy_relays_local_websocket_messages():
 
         async def reply(message):
             replies.append(message)
-            if message["type"] in {"websocket_message", "websocket_closed"}:
+            if message["type"] in {"websocket_message", "websocket_closed", "websocket_message_chunk"}:
                 received.set()
 
         try:
@@ -302,8 +302,94 @@ def test_service_proxy_relays_local_websocket_messages():
                     reply,
                 )
                 assert replies.pop()["type"] == "websocket_opened"
+
+                # Test chunked websocket send (e.g. large file upload over WebSocket)
+                large_binary = b"A" * 100000
+                chunk_size = 32 * 1024
+                for i in range(0, len(large_binary), chunk_size):
+                    chunk = large_binary[i : i + chunk_size]
+                    is_last = (i + chunk_size >= len(large_binary))
+                    seq = i // chunk_size
+                    await proxy(
+                        {
+                            "type": "websocket_send_chunk",
+                            "socket_id": "socket-2",
+                            "data_type": "binary",
+                            "seq": seq,
+                            "eof": is_last,
+                            "body": chunk,
+                        },
+                        reply,
+                    )
+                # Handler echoes binary reversed: large_binary[::-1]
+                # Since large_binary is > 32KB, _relay_websocket will chunk it back!
+                while not any(r.get("eof") for r in replies if r.get("type") == "websocket_message_chunk"):
+                    await asyncio.sleep(0.01)
+                recv_chunks = [r for r in replies if r.get("type") == "websocket_message_chunk"]
+                reassembled = b"".join(r["body"] for r in recv_chunks)
+                assert reassembled == large_binary[::-1]
+                replies.clear()
+
                 await proxy.close_connection(reply)
                 assert proxy.websockets == {}
+        finally:
+            await server.close()
+
+    asyncio.run(scenario())
+
+
+def test_service_proxy_relays_chunked_http_request():
+    async def scenario():
+        received_body = bytearray()
+
+        async def upload_handler(request):
+            body = await request.read()
+            received_body.extend(body)
+            return web.Response(text="uploaded")
+
+        app = web.Application()
+        app.router.add_post("/upload", upload_handler)
+        server = TestServer(app)
+        await server.start_server()
+        replies = []
+
+        async def reply(message):
+            replies.append(message)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                proxy = ServiceProxy(str(server.make_url("/")), session)
+                large_payload = b"POSTDATA" * 10000  # 80,000 bytes
+                chunk_size = 32 * 1024
+                await proxy(
+                    {
+                        "type": "http_request",
+                        "id": 1,
+                        "method": "POST",
+                        "path": "/upload",
+                        "chunked": True,
+                        "total_size": len(large_payload),
+                    },
+                    reply,
+                )
+                for i in range(0, len(large_payload), chunk_size):
+                    chunk = large_payload[i : i + chunk_size]
+                    is_last = (i + chunk_size >= len(large_payload))
+                    seq = i // chunk_size
+                    await proxy(
+                        {
+                            "type": "http_request_chunk",
+                            "id": 1,
+                            "seq": seq,
+                            "eof": is_last,
+                            "body": chunk,
+                        },
+                        reply,
+                    )
+                assert len(replies) == 1
+                assert replies[0]["status"] == 200
+                assert replies[0]["body"] == b"uploaded"
+                assert bytes(received_body) == large_payload
         finally:
             await server.close()
 

@@ -138,19 +138,55 @@ class ServiceProxy:
         self.target = target
         self.session = session
         self.websockets = {}
+        self.socket_send_buffers = {}
+        self.http_request_buffers = {}
 
     async def __call__(self, message, reply):
         message_type = message.get("type")
         if message_type == "http_request":
+            if message.get("chunked"):
+                self.http_request_buffers[message["id"]] = {
+                    "header": message,
+                    "chunks": [],
+                }
+                return
             await self._proxy_http(message, reply)
+        elif message_type == "http_request_chunk":
+            await self._handle_http_request_chunk(message, reply)
         elif message_type == "websocket_open":
             await reply(await self._open_websocket(message, reply))
         elif message_type == "websocket_send":
             await self._send_websocket(message, reply)
+        elif message_type == "websocket_send_chunk":
+            await self._send_websocket_chunk(message, reply)
         elif message_type == "websocket_close":
             await self._close_websocket(message, reply)
         else:
             raise ValueError("unsupported proxy message type")
+
+    async def _handle_http_request_chunk(self, message, reply):
+        req_id = message.get("id")
+        entry = self.http_request_buffers.get(req_id)
+        if not entry:
+            return
+        body = message.get("body")
+        if body is None:
+            data = message.get("data")
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                body = bytes(data)
+            elif isinstance(data, str):
+                body = decode_body(data)
+            else:
+                body = b""
+        elif not isinstance(body, (bytes, bytearray, memoryview)):
+            body = bytes(body)
+        entry["chunks"].append(bytes(body))
+        if message.get("eof"):
+            self.http_request_buffers.pop(req_id, None)
+            full_body = b"".join(entry["chunks"])
+            req_msg = entry["header"]
+            req_msg["body"] = full_body
+            await self._proxy_http(req_msg, reply)
 
     async def _proxy_http(self, message, reply):
         request_id = message.get("id")
@@ -286,19 +322,54 @@ class ServiceProxy:
         try:
             async for message in websocket:
                 if message.type == aiohttp.WSMsgType.TEXT:
-                    await reply({
-                        "type": "websocket_message",
-                        "socket_id": key[1],
-                        "data_type": "text",
-                        "data": message.data,
-                    })
+                    raw_text = message.data
+                    raw_bytes = raw_text.encode("utf-8")
+                    if len(raw_bytes) <= CHUNK_SIZE:
+                        await reply({
+                            "type": "websocket_message",
+                            "socket_id": key[1],
+                            "data_type": "text",
+                            "data": raw_text,
+                        })
+                    else:
+                        for i in range(0, len(raw_bytes), CHUNK_SIZE):
+                            chunk = raw_bytes[i : i + CHUNK_SIZE]
+                            is_last = (i + CHUNK_SIZE >= len(raw_bytes))
+                            seq = i // CHUNK_SIZE
+                            await reply({
+                                "type": "websocket_message_chunk",
+                                "socket_id": key[1],
+                                "data_type": "text",
+                                "seq": seq,
+                                "eof": is_last,
+                                "body": chunk,
+                            })
+                            if seq % 8 == 0:
+                                await asyncio.sleep(0.001)
                 elif message.type == aiohttp.WSMsgType.BINARY:
-                    await reply({
-                        "type": "websocket_message",
-                        "socket_id": key[1],
-                        "data_type": "binary",
-                        "body": message.data,
-                    })
+                    raw_bytes = bytes(message.data)
+                    if len(raw_bytes) <= CHUNK_SIZE:
+                        await reply({
+                            "type": "websocket_message",
+                            "socket_id": key[1],
+                            "data_type": "binary",
+                            "body": raw_bytes,
+                        })
+                    else:
+                        for i in range(0, len(raw_bytes), CHUNK_SIZE):
+                            chunk = raw_bytes[i : i + CHUNK_SIZE]
+                            is_last = (i + CHUNK_SIZE >= len(raw_bytes))
+                            seq = i // CHUNK_SIZE
+                            await reply({
+                                "type": "websocket_message_chunk",
+                                "socket_id": key[1],
+                                "data_type": "binary",
+                                "seq": seq,
+                                "eof": is_last,
+                                "body": chunk,
+                            })
+                            if seq % 8 == 0:
+                                await asyncio.sleep(0.001)
                 elif message.type == aiohttp.WSMsgType.ERROR:
                     await reply({
                         "type": "websocket_error",
@@ -315,6 +386,7 @@ class ServiceProxy:
             current = self.websockets.get(key)
             if current is not None and current[0] is websocket:
                 self.websockets.pop(key, None)
+            self.socket_send_buffers.pop(key, None)
             if not websocket.closed:
                 await websocket.close()
             with contextlib.suppress(ConnectionError):
@@ -329,6 +401,7 @@ class ServiceProxy:
         key = self._socket_key(message, reply)
         entry = self.websockets.get(key)
         if entry is None or entry[0].closed:
+            self.socket_send_buffers.pop(key, None)
             raise ConnectionError("websocket is not open")
         data_type = message.get("data_type")
         if data_type == "text" and isinstance(message.get("data"), str):
@@ -348,8 +421,39 @@ class ServiceProxy:
         else:
             raise ValueError("invalid websocket message")
 
+    async def _send_websocket_chunk(self, message, reply):
+        key = self._socket_key(message, reply)
+        entry = self.websockets.get(key)
+        if entry is None or entry[0].closed:
+            self.socket_send_buffers.pop(key, None)
+            raise ConnectionError("websocket is not open")
+        body = message.get("body")
+        if body is None:
+            data = message.get("data")
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                body = bytes(data)
+            elif isinstance(data, str):
+                body = decode_body(data)
+            else:
+                body = b""
+        elif not isinstance(body, (bytes, bytearray, memoryview)):
+            body = bytes(body)
+        buf = self.socket_send_buffers.setdefault(key, [])
+        buf.append(bytes(body))
+        if message.get("eof"):
+            self.socket_send_buffers.pop(key, None)
+            payload = b"".join(buf)
+            data_type = message.get("data_type")
+            if data_type == "text":
+                await entry[0].send_str(payload.decode("utf-8"))
+            elif data_type == "binary":
+                await entry[0].send_bytes(payload)
+            else:
+                raise ValueError("invalid websocket message data_type")
+
     async def _close_websocket(self, message, reply):
         key = self._socket_key(message, reply)
+        self.socket_send_buffers.pop(key, None)
         entry = self.websockets.get(key)
         if entry is None:
             return
@@ -367,6 +471,8 @@ class ServiceProxy:
         await entry[0].close(code=code, message=reason.encode("utf-8"))
 
     async def close_connection(self, reply):
+        self.socket_send_buffers.clear()
+        self.http_request_buffers.clear()
         owner = id(reply)
         entries = [
             (key, websocket, task)

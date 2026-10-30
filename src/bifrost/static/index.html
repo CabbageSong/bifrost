@@ -74,14 +74,56 @@ async function dumpPeerStats(reason){
 function encodePacket(header,bodyBytes){let hb=new TextEncoder().encode(JSON.stringify(header)),b=bodyBytes||new Uint8Array(0);if(b instanceof ArrayBuffer)b=new Uint8Array(b);else if(ArrayBuffer.isView(b)&&!(b instanceof Uint8Array))b=new Uint8Array(b.buffer,b.byteOffset,b.byteLength);let out=new Uint8Array(4+hb.length+b.length);new DataView(out.buffer).setUint32(0,hb.length);out.set(hb,4);out.set(b,4+hb.length);return out.buffer}
 function decodePacket(buf){if(buf.byteLength<4)throw Error('packet too short');let v=new DataView(buf),hl=v.getUint32(0);if(buf.byteLength<4+hl)throw Error('packet header truncated');let hb=new Uint8Array(buf,4,hl);return {header:JSON.parse(new TextDecoder().decode(hb)),body:new Uint8Array(buf.slice(4+hl))}}
 
+async function sendDataChannelPacket(data){
+  if(!dc||dc.readyState!=='open')throw Error('WebRTC 数据通道未连接');
+  if(dc.bufferedAmount>256*1024){
+    await new Promise(r=>{
+      let done=false;
+      let finish=()=>{
+        if(done)return;
+        done=true;
+        try{dc.removeEventListener('bufferedamountlow',finish)}catch(_){}
+        r()
+      };
+      try{
+        dc.bufferedAmountLowThreshold=64*1024;
+        dc.addEventListener('bufferedamountlow',finish,{once:true});
+      }catch(_){}
+      setTimeout(finish,50)
+    });
+  }
+  dc.send(data)
+}
+
 function request(method,path,headers={},body=null,timeoutMs=120000){
-  return new Promise((ok,no)=>{
+  return new Promise(async (ok,no)=>{
     let id=++seq;
     if(!dc||dc.readyState!=='open'){no(Error('WebRTC 数据通道未连接'));return}
     path=(path||'/').split('#',1)[0]||'/';
     pending.set(id,{ok,no});
-    let header={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{}};
-    try{dc.send(encodePacket(header,body))}catch(e){pending.delete(id);no(e);return}
+    let rawBody=null;
+    if(body){
+      if(body instanceof Uint8Array)rawBody=body;
+      else if(body instanceof ArrayBuffer)rawBody=new Uint8Array(body);
+      else if(ArrayBuffer.isView(body))rawBody=new Uint8Array(body.buffer,body.byteOffset,body.byteLength);
+      else if(typeof body==='string')rawBody=new TextEncoder().encode(body);
+    }
+    if(!rawBody||rawBody.length<=32768){
+      let header={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{}};
+      try{await sendDataChannelPacket(encodePacket(header,rawBody))}catch(e){pending.delete(id);no(e);return}
+    }else{
+      let header={type:'http_request',id,method:method||'GET',path:path||'/',headers:headers||{},chunked:true,total_size:rawBody.length};
+      try{
+        await sendDataChannelPacket(encodePacket(header,null));
+        for(let i=0;i<rawBody.length;i+=32768){
+          let chunk=rawBody.subarray(i,i+32768);
+          let isLast=(i+32768>=rawBody.length);
+          let chunkSeq=Math.floor(i/32768);
+          let chunkHeader={type:'http_request_chunk',id,seq:chunkSeq,eof:isLast};
+          await sendDataChannelPacket(encodePacket(chunkHeader,chunk))
+        }
+      }catch(e){pending.delete(id);no(e);return}
+    }
     setTimeout(()=>{if(pending.has(id)){pending.delete(id);no(Error('内网服务响应超时'))}},timeoutMs)
   })
 }
@@ -637,7 +679,8 @@ async function prepareHtml(text){
   }));
   return '<!doctype html>'+doc.documentElement.outerHTML
 }
-function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(encodePacket({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear()}
+let appSocketRecvBuffers=new Map(),socketSendChains=new Map();
+function closeAppSockets(){if(dc&&dc.readyState==='open')for(let socketId of appSockets.keys())dc.send(encodePacket({type:'websocket_close',socket_id:socketId,code:1001,reason:'page navigation'}));appSockets.clear();appSocketRecvBuffers.clear();socketSendChains.clear()}
 async function navigate(path,record=true){if(!path.startsWith('/'))path='/'+path;currentPath=path;if(record){historyPaths=historyPaths.slice(0,historyIndex+1);if(historyPaths.at(-1)!==path)historyPaths.push(path);historyIndex=historyPaths.length-1}setAddr(path);if(!dc||dc.readyState!=='open'){reconnectNow('navigation requested');return}st('加载中');try{let downloaded=await render(await request('GET',path,{accept:'text/html,text/plain,application/json,*/*','accept-encoding':'gzip'},null));if(dc&&dc.readyState==='open')st(downloaded?'下载已开始':'已连接 · '+connectionId,'ok')}catch(e){warn('navigate error',{path,message:e.message,stack:e.stack});if(!dc||dc.readyState!=='open'){scheduleReconnect('request transport closed');return}st('请求失败','bad',e.message)}}
 async function render(r,requested=''){
   if(isDownloadResponse(r,requested)){triggerDownload(r,requested,r.response_url||currentPath);return true}
@@ -655,8 +698,67 @@ async function render(r,requested=''){
   else{let p=document.createElement('pre');p.textContent=text;view.replaceChildren(p);frame=null}
   return false
 }
-function deliverSocketEvent(message,body){let entry=appSockets.get(message.socket_id);if(!entry)return;let event={type:'bifrost-websocket-event',socketId:entry.socketId};if(message.type==='websocket_opened'){event.event='open';event.protocol=message.protocol||''}else if(message.type==='websocket_message'){event.event='message';event.data_type=message.data_type;event.data=message.data_type==='binary'?(body||new Uint8Array(0)):message.data}else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){event.event='error';entry.source.postMessage(event,'*');event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};appSockets.delete(message.socket_id)}else if(message.type==='websocket_closed'){event.event='close';event.code=message.code||1006;event.reason=message.reason||'';appSockets.delete(message.socket_id)}else return;entry.source.postMessage(event,'*')}
-function failTransport(){for(let [id,p] of pending){p.no(Error('WebRTC 数据通道已断开'))}pending.clear();for(let entry of appSockets.values()){entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'error'},'*');entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''},'*')}appSockets.clear()}
+function deliverSocketEvent(message,body){
+  let entry=appSockets.get(message.socket_id);
+  if(!entry)return;
+  if(message.type==='websocket_message_chunk'){
+    let buf=appSocketRecvBuffers.get(message.socket_id);
+    if(!buf){
+      buf={chunks:[],len:0,dataType:message.data_type};
+      appSocketRecvBuffers.set(message.socket_id,buf);
+    }
+    let chunkBody=body||new Uint8Array(0);
+    buf.chunks.push(chunkBody);
+    buf.len+=chunkBody.length;
+    if(message.eof){
+      appSocketRecvBuffers.delete(message.socket_id);
+      let full=new Uint8Array(buf.len),off=0;
+      for(let c of buf.chunks){full.set(c,off);off+=c.length}
+      let fullData=full;
+      if(buf.dataType==='text'){
+        fullData=new TextDecoder().decode(full);
+      }
+      deliverSocketEvent({type:'websocket_message',socket_id:message.socket_id,data_type:buf.dataType,data:fullData},full);
+    }
+    return;
+  }
+  let event={type:'bifrost-websocket-event',socketId:entry.socketId};
+  if(message.type==='websocket_opened'){
+    event.event='open';event.protocol=message.protocol||'';
+  }else if(message.type==='websocket_message'){
+    event.event='message';event.data_type=message.data_type;event.data=message.data_type==='binary'?(body||new Uint8Array(0)):message.data;
+  }else if(message.type==='websocket_error'||message.type==='websocket_open_failed'){
+    appSocketRecvBuffers.delete(message.socket_id);
+    socketSendChains.delete(message.socket_id);
+    event.event='error';entry.source.postMessage(event,'*');
+    event={type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''};
+    appSockets.delete(message.socket_id);
+  }else if(message.type==='websocket_closed'){
+    appSocketRecvBuffers.delete(message.socket_id);
+    socketSendChains.delete(message.socket_id);
+    event.event='close';event.code=message.code||1006;event.reason=message.reason||'';
+    appSockets.delete(message.socket_id);
+  }else return;
+  entry.source.postMessage(event,'*');
+}
+function failTransport(){
+  for(let [id,p] of pending){p.no(Error('WebRTC 数据通道已断开'))}
+  pending.clear();
+  for(let entry of appSockets.values()){
+    entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'error'},'*');
+    entry.source.postMessage({type:'bifrost-websocket-event',socketId:entry.socketId,event:'close',code:1006,reason:''},'*');
+  }
+  appSockets.clear();appSocketRecvBuffers.clear();socketSendChains.clear();
+}
+function queueSocketSend(remoteId,sendFn){
+  let prev=socketSendChains.get(remoteId)||Promise.resolve();
+  let next=prev.then(sendFn,sendFn);
+  socketSendChains.set(remoteId,next);
+  next.finally(()=>{
+    if(socketSendChains.get(remoteId)===next)socketSendChains.delete(remoteId);
+  });
+  return next;
+}
 window.onmessage=async e=>{
   if(!e.data||!frame||e.source!==frame.contentWindow)return;
   let source=e.source,q=e.data;
@@ -684,15 +786,49 @@ window.onmessage=async e=>{
   if(q.type==='bifrost-websocket'){
     let remoteId=String(frameSerial)+':'+String(q.socketId);
     try{
-      if(q.action==='open'){let url=new URL(q.url);if(!/^wss?:$/.test(url.protocol))throw Error('unsupported WebSocket URL');appSockets.set(remoteId,{source,socketId:String(q.socketId)});dc.send(encodePacket({type:'websocket_open',socket_id:remoteId,path:url.pathname+url.search,protocols:q.protocols||[]}))}
-      else if(q.action==='send'&&appSockets.has(remoteId)){
-        let header={type:'websocket_send',socket_id:remoteId,data_type:q.data_type};
-        if(q.data_type==='text')header.data=q.data;
-        dc.send(encodePacket(header,q.data_type==='binary'?q.data:null))
+      if(q.action==='open'){
+        let url=new URL(q.url);
+        if(!/^wss?:$/.test(url.protocol))throw Error('unsupported WebSocket URL');
+        appSockets.set(remoteId,{source,socketId:String(q.socketId)});
+        await sendDataChannelPacket(encodePacket({type:'websocket_open',socket_id:remoteId,path:url.pathname+url.search,protocols:q.protocols||[]}))
       }
-      else if(q.action==='close'&&appSockets.has(remoteId))dc.send(encodePacket({type:'websocket_close',socket_id:remoteId,code:q.code,reason:q.reason||''}))
+      else if(q.action==='send'&&appSockets.has(remoteId)){
+        await queueSocketSend(remoteId,async()=>{
+          if(!appSockets.has(remoteId))return;
+          let bytes=null;
+          if(q.data_type==='binary'){
+            bytes=q.data instanceof Uint8Array?q.data:new Uint8Array(q.data||0);
+          }else if(q.data_type==='text'){
+            bytes=new TextEncoder().encode(String(q.data||''));
+          }
+          if(!bytes||bytes.length<=32768){
+            let header={type:'websocket_send',socket_id:remoteId,data_type:q.data_type};
+            if(q.data_type==='text')header.data=q.data;
+            await sendDataChannelPacket(encodePacket(header,q.data_type==='binary'?bytes:null))
+          }else{
+            for(let i=0;i<bytes.length;i+=32768){
+              let chunk=bytes.subarray(i,i+32768);
+              let isLast=(i+32768>=bytes.length);
+              let seq=Math.floor(i/32768);
+              let header={type:'websocket_send_chunk',socket_id:remoteId,data_type:q.data_type,seq:seq,eof:isLast};
+              await sendDataChannelPacket(encodePacket(header,chunk))
+            }
+          }
+        });
+      }
+      else if(q.action==='close'&&appSockets.has(remoteId)){
+        socketSendChains.delete(remoteId);
+        await sendDataChannelPacket(encodePacket({type:'websocket_close',socket_id:remoteId,code:q.code,reason:q.reason||''}))
+      }
       else throw Error('invalid WebSocket action')
-    }catch(error){appSockets.delete(remoteId);source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'error'},'*');source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'close',code:1006,reason:''},'*')}
+    }catch(error){
+      warn('websocket action failed',{action:q.action,message:error.message});
+      appSockets.delete(remoteId);
+      appSocketRecvBuffers.delete(remoteId);
+      socketSendChains.delete(remoteId);
+      source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'error'},'*');
+      source.postMessage({type:'bifrost-websocket-event',socketId:String(q.socketId),event:'close',code:1006,reason:''},'*')
+    }
     return
   }
   if(q.type!=='bifrost-request')return;

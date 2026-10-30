@@ -73,6 +73,10 @@ def test_static_page_bridges_subresources_navigation_and_websockets():
     assert "readBlobAsDataUrl" in text
     assert "blobStore" in text
     assert "HTMLMediaElement.prototype" in text
+    assert "sendDataChannelPacket" in text
+    assert "websocket_send_chunk" in text
+    assert "websocket_message_chunk" in text
+    assert "http_request_chunk" in text
 
 
 def test_static_page_bridges_browser_downloads():
